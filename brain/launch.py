@@ -1,18 +1,21 @@
-"""统一启动入口：读 config.yaml → 打印当前配置 → 启动大脑或控制台。
+"""统一启动入口：读 config.yaml → 打印当前配置 → 启动大脑。
 
 用法：
-    python -m brain.launch brain      # 实时链路
-    python -m brain.launch console    # 控制平面
-    python -m brain.launch all        # 大脑 + 控制台 + 三个模型服务一键全启
+    python -m brain.launch brain      # 大脑（已含控制台与情绪判断）
+    python -m brain.launch all        # 大脑 + 语音服务
+    python -m brain.launch status     # 只看模型服务是否在跑
 
 端口 / 地址全部来自 config.yaml，bat 不再写死。
 
 哪些模型服务会被一键拉起：
-    判断（:8101）  ASR（:8103）  TTS（:8102）
-    —— 这三个都是本项目 .venv 里装得上的纯 Python/CPU 服务。
+    ASR（:8103）  TTS（:8102）
+    —— 这两个都是本项目 .venv 里装得上的纯 Python/CPU 服务。
+不需要独立进程了：
+    控制台 → 已并入大脑，同一个 8000
+    情绪判断 → 走进程内 onnx（provider judge mode=onnx）
 不包括：
-    Ollama（:11434）：有自己的安装/模型下载，0-启动大模型.bat 单独处理
-    GPT-SoVITS（:9880）：独立整合包自带 torch，6-启动GPT语音.bat 单独处理
+    对话大模型（F 盘，你自己启动）
+    GPT-SoVITS（:9880）：独立整合包自带 torch
 """
 from __future__ import annotations
 
@@ -208,9 +211,9 @@ def _check_model_services() -> tuple[list[dict], list[str]]:
 
 
 _LABEL = {
-    "brain": "大脑 / 实时链路",
-    "console": "控制台 / 控制平面",
-    "all": "一键全启（大脑 + 控制台 + 三个模型服务）",
+    "brain": "大脑 / 实时链路 + 控制台 + 情绪判断（同一个进程）",
+    "console": "控制台（已并入大脑，这里只是兼容旧脚本）",
+    "all": "一键全启（大脑 + 语音服务）",
     "status": "只看模型服务状态（不启动任何东西）",
 }
 
@@ -234,7 +237,7 @@ def _print_config(which: str) -> None:
     print(f"  本次启动    : {_LABEL.get(which, which)}")
     print("  运行模式    : 真实模型（程序里没有模拟路径；模型服务没起会明确报错）")
     print(f"  大脑地址    : http://{settings.BRAIN_HOST}:{settings.BRAIN_PORT}")
-    print(f"  控制台地址  : http://{settings.CONSOLE_HOST}:{settings.CONSOLE_PORT}/admin.html")
+    print(f"  控制台地址  : http://{settings.BRAIN_HOST}:{settings.BRAIN_PORT}/admin.html（同一进程）")
     print(f"  数据库      : {settings.DB_PATH}")
     print(f"  控制台口令  : {'已设置' if settings.ADMIN_TOKEN else '未设置（本地免密）'}")
     print("=" * 58)
@@ -273,7 +276,7 @@ def main() -> None:
         _print_config(which)
 
     if which == "all":
-        admin_url = f"http://127.0.0.1:{settings.CONSOLE_PORT}/admin.html"
+        admin_url = f"http://127.0.0.1:{settings.BRAIN_PORT}/admin.html"
 
         # ----- Step 1: 按 runtime mode 检查需要独立启动的模型服务 -----
         model_checks, config_hints = _check_model_services()
@@ -301,7 +304,8 @@ def main() -> None:
         print(flush=True)
 
         # ----- Step 2: 检查大脑 / 控制台端口 -----
-        plan = [("brain", settings.BRAIN_PORT), ("console", settings.CONSOLE_PORT)]
+        # 控制台与情绪判断都并进大脑了：应用侧只拉一个进程、只占一个端口。
+        plan = [("brain", settings.BRAIN_PORT)]
         app_targets = []
         for name, port in plan:
             if _port_busy(port):
@@ -395,8 +399,10 @@ def main() -> None:
             return
 
     if which == "console":
-        port, url = settings.CONSOLE_PORT, f"http://127.0.0.1:{settings.CONSOLE_PORT}/admin.html"
-        from brain.app_console import app
+        # 兼容旧启动脚本：控制台已并入大脑，这里直接起大脑，不再单独占一个端口。
+        print("[提示] 控制台已经并进大脑了，本次实际启动的是大脑（含 /admin.html）。")
+        port, url = settings.BRAIN_PORT, f"http://127.0.0.1:{settings.BRAIN_PORT}/admin.html"
+        from brain.app_brain import app
     else:
         port, url = settings.BRAIN_PORT, f"http://127.0.0.1:{settings.BRAIN_PORT}/"
         from brain.app_brain import app
@@ -411,7 +417,7 @@ def main() -> None:
             pass
         return
 
-    host = settings.BRAIN_HOST if which == "brain" else settings.CONSOLE_HOST
+    host = settings.BRAIN_HOST
     try:
         # log_config=None：别让 uvicorn 把 root 的日志handler 清掉，否则写不进文件
         uvicorn.run(app, host=host, port=port, log_level="warning", log_config=None)

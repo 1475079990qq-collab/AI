@@ -1,24 +1,24 @@
 """请求级 prompt 快照构建。
 
 system 内容依次放入：
+  0) 身份块（名字 / 称呼）——每轮直连置顶，绝不走检索
   1) persona["system_prompt"]
   2) 事实片段（memory.retrieve 返回的 facts）
-  2.5) 长期记忆 / 知识片段（bundle["knowledge"]，标题取 knowledge.section_title）
+  2.2) 长期画像：他是什么人
+  2.4) 前几天的事（episodes，压缩过的每日摘要）
+  2.5) 他还没收尾的事（open_loops，最多提一件）
   3) "近期情绪事件:" 段落（每条含 label 与 intensity，供 LLM 记忆、
      也供冒烟测试断言「上一轮情绪是否进了 prompt」；格式不得改动）
   4) 对话风格约定（口语、短句、不复读）
   5) "只输出回复正文，禁止输出情感标签/分析/JSON"
 最后按时间顺序追加历史对话（user / assistant），再追加本轮 {"role":"user"}。
-历史对话让「啥」「哦」这类短句也有上下文可依，避免每轮像第一次见面。
+
+知识库不再出现在这里：它曾经每轮被检索并整段灌入（纪要元文本一起进来），
+既是「听不懂」的源头，也是 2 秒阻塞的源头。现在只在明确提问时由工具去查。
 """
 from __future__ import annotations
 
 from brain.schemas import EmotionResult
-
-try:
-    from brain.services import providers
-except Exception:  # pragma: no cover - 取决于 S1 是否落地
-    providers = None
 
 _OUTPUT_RULE = (
     "只输出你这个角色要说的话本身。\n"
@@ -58,27 +58,21 @@ _NO_DODGE_RULE = (
 )
 
 
-def _section_title() -> str:
-    """从 knowledge 配置读段落标题；异常 / 空值回退默认标题。"""
-    try:
-        if providers is not None:
-            raw = providers.get("knowledge") or {}
-            cfg = raw.get("config") if isinstance(raw.get("config"), dict) else {
-                k: v for k, v in raw.items()
-                if k not in {"code", "name", "category", "enabled", "mode",
-                             "version", "updated_at", "fields"}
-            }
-            title = str(cfg.get("section_title") or "").strip()
-            if title:
-                return title
-    except Exception:
-        pass
-    return _DEFAULT_SECTION_TITLE
-
-
 def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
           history: list[dict] | None = None) -> list[dict]:
     blocks: list[str] = []
+
+    # 0) 身份：置顶、每轮直连。名字只允许有一个来源，下文任何称呼以这里为准。
+    ident = (bundle or {}).get("identity") or {}
+    assistant = str(ident.get("assistant") or "").strip()
+    user_name = str(ident.get("user") or "").strip()
+    if assistant or user_name:
+        id_lines = ["【身份｜最高优先级，与任何段落冲突时以本段为准】"]
+        if assistant:
+            id_lines.append(f"- 你叫「{assistant}」。别人怎么叫你、你怎么自称，都只用这个名字。")
+        if user_name:
+            id_lines.append(f"- 对方叫「{user_name}」，可以直接叫他名字。")
+        blocks.append("\n".join(id_lines))
 
     # 1) 人格模板
     blocks.append(str((persona or {}).get("system_prompt", "")).strip())
@@ -104,30 +98,30 @@ def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
             "\n（说明：「雷区」只是别主动提起，不是禁止讨论——他自己提起来就正常聊。）"
         )
 
-    # 2.5) 长期记忆 / 知识片段：位于事实之后、「近期情绪事件:」之前。
-    #      该段落不含「近期情绪事件」字样，不影响 mock 回显断言。
-    knowledge = (bundle or {}).get("knowledge") or []
-    if knowledge:
-        kn_lines = [_section_title() + ":"]
-        for item in knowledge:
-            if not isinstance(item, dict):
+    # 2.4) 前几天的事：压缩过的每日摘要，一直在身上，不用检索。
+    episodes = (bundle or {}).get("episodes") or []
+    if episodes:
+        ep_lines = ["你记得前几天的事："]
+        for ep in episodes:
+            day = str(ep.get("day") or "").strip()
+            body = str(ep.get("text") or "").strip()
+            if not body:
                 continue
-            title = str(item.get("title") or "").strip()
-            content = str(item.get("content") or "").strip()
-            source = str(item.get("source") or "").strip()
-            # 碎句过滤：一段一两句话的「记忆」没有可复用信息，塞进来只会让模型
-            # 抓住那几个词反复复述（用户实测的复读就是这么来的）。
-            if len(content) < 20:
-                continue
-            parts = [p for p in (title, content) if p]
-            if not parts:
-                continue
-            line = "- " + ("：".join(parts) if len(parts) > 1 else parts[0])
-            if source:
-                line += f"（来源:{source}）"
-            kn_lines.append(line)
-        if len(kn_lines) > 1:
-            blocks.append("\n".join(kn_lines))
+            ep_lines.append(f"{day}：\n{body}")
+        if len(ep_lines) > 1:
+            blocks.append("\n".join(ep_lines) +
+                          "\n（这是你自己的记忆，别逐条复述，挑合适的接一句就行。）")
+
+    # 2.5) 他还没收尾的事：这一轮最多自然提一件，多提就成了催促。
+    loops = (bundle or {}).get("open_loops") or []
+    if loops:
+        loop_lines = ["他提过、还没收尾的事（这一轮最多自然地提一件，别提第二件）："]
+        for item in loops:
+            txt = str(item.get("text") or "").strip()
+            if txt:
+                loop_lines.append(f"- {txt}")
+        if len(loop_lines) > 1:
+            blocks.append("\n".join(loop_lines))
 
     # 3) 近期情绪事件：label 值本身入文（冒烟测试可据此断言），并带 intensity
     emotions = (bundle or {}).get("emotions") or []

@@ -1,23 +1,16 @@
 """事实记忆层：优先 chromadb，未安装 / 异常一律降级到 SQLite。
 
-装了 chromadb 就走 Chroma，异常兜底 SQLite。
-knowledge_inject=1 且知识库未关闭时，额外注入知识库检索片段。
+边界（重构后）：
+- 这里只管「关于这个人的记忆」：事实、每日摘要、未完成的事、画像、身份称呼。
+- **知识库不在这里出现**。它曾经每轮被检索一次，未命中时同步 wait(2.0) 卡死事件循环，
+  还把对话纪要的元文本整段灌进 prompt。现在知识库降级为「明确提问时才查的工具」，
+  与记忆彻底分开：记忆是一直带在身上的，知识是去书房翻的。
 """
 from __future__ import annotations
 
 from brain import db
 from brain.config import settings
 from brain.schemas import new_request_id
-
-# 知识库适配层 / providers（S1 新建）；未落地 / 异常一律降级，不注入也不抛。
-try:
-    from brain.services import knowledge
-except Exception:  # pragma: no cover
-    knowledge = None
-try:
-    from brain.services import providers
-except Exception:  # pragma: no cover
-    providers = None
 
 try:
     import chromadb
@@ -86,44 +79,28 @@ def _facts_only(user_id: str, query: str, top_k: int) -> tuple[list[dict], str]:
         return [], "sqlite"
 
 
-def _knowledge_results(query: str) -> list[dict]:
-    """仅当 knowledge_inject=1 且知识库未关闭时返回片段；任何异常返回 []。"""
+def _identity() -> dict:
+    """身份与称呼：每轮直连 prompt 顶部，永不走向检索。
+
+    为什么单独拎出来：名字这类东西一旦跟着「事实」一起进检索池，
+    就会出现「记忆里写了新名字、嘴上一句没改」——历史上真发生过。
+    身份是确定的，不该有召回率。
+    """
     try:
         params = db.get_runtime_params() or {}
     except Exception:
-        return []
-    try:
-        inject = str(params.get("knowledge_inject", "1")).strip().lower() in {"1", "true", "yes", "on"}
-    except Exception:
-        return []
-    if not inject:
-        return []
-    # 仅明确 off / enabled=0 视为关闭。
-    try:
-        if providers is not None:
-            raw = providers.get("knowledge") or {}
-            cfg = raw.get("config") if isinstance(raw.get("config"), dict) else {}
-            mode = str(raw.get("mode") or cfg.get("mode") or "").strip().lower()
-            enabled = raw.get("enabled", 1)
-            if mode == "off" or str(enabled).strip().lower() in {"0", "false", "none"}:
-                return []
-    except Exception:
-        pass  # 判断异常不阻断，继续尝试检索
-    try:
-        if knowledge is None:
-            return []
-        try:
-            res = knowledge.search(query, fast=True) or {}
-        except TypeError:  # 兼容旧签名
-            res = knowledge.search(query) or {}
-        items = res.get("results") or []
-        return [r for r in items if isinstance(r, dict)]
-    except Exception:
-        return []
+        params = {}
+    return {
+        "assistant": str(params.get("assistant_name") or "").strip(),
+        "user": str(params.get("user_name") or "").strip(),
+    }
 
 
 def retrieve(user_id: str, query: str, top_k: int = 3) -> dict:
-    """返回 {"facts", "emotions", "source", "knowledge"}；任何异常都不抛。"""
+    """返回热路径要用的全部记忆：facts / emotions / profile / episodes / open_loops。
+
+    任何异常都不抛；拿不到的段落留空，prompt 侧自然就不出现。
+    """
     try:
         min_intensity, eff_top_k = _runtime(top_k)
     except Exception:
@@ -144,12 +121,25 @@ def retrieve(user_id: str, query: str, top_k: int = 3) -> dict:
         profile_text = _get_profile(user_id)
     except Exception:
         profile_text = ""
+    # 每日摘要：最近几天他都在忙什么（压缩过的，不是原文流水）。
+    try:
+        episodes = db.get_recent_episodes(user_id, days=3)
+    except Exception:
+        episodes = []
+    # 未完成的事：他提过、还没收尾，可以主动问一次。
+    try:
+        open_loops = db.list_open_loops(user_id, limit=3)
+    except Exception:
+        open_loops = []
     return {
         "facts": facts,
         "emotions": emotions,
         "source": source,
-        "knowledge": _knowledge_results(query),
+        "knowledge": [],          # 已迁出热路径，保留键位兼容旧调用
         "profile": profile_text,
+        "episodes": episodes,
+        "open_loops": open_loops,
+        "identity": _identity(),
     }
 
 

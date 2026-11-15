@@ -1,9 +1,10 @@
-# companion 启动配置 —— 改完要重开 1 号（或 2 号 + 3 号）窗口才生效
-# 启动时黑窗口会把这里的值原样打印出来，改没改、生没生效一眼能看到。
+# companion 启动配置
+# 唯一来源原则：同一件事只允许写在一个地方。
+#   本文件 = 进程怎么启动、连到哪 -> 启动读一次，改完要重启
+#   数据库（控制台） = 人格、称呼、模型卡地址与型号、温度、音色 -> 改完立即生效
 #
-# 分工（跟小智一样，别一处东西放两处）：
-#   本文件 = 服务怎么启动、连到哪台模型服务 —— 启动读一次，改完重启
-#   控制台 = 人格、情绪、音色、温度这些 —— 改完立即生效，不用重启
+# 历史教训：模型地址曾经同时写在 config.yaml 和数据库模型卡里，两边还不一致，
+# 结果「改了不生效」查了半天。现在模型服务只在控制台里改，本文件只做兜底。
 #
 # 左边是配置项名字别动，只改冒号右边的值。
 
@@ -11,51 +12,22 @@
 服务:
   BRAIN_HOST: 0.0.0.0            # 0.0.0.0 = 手机局域网也能连；只想本机用改 127.0.0.1
   BRAIN_PORT: 8000
-  CONSOLE_HOST: 0.0.0.0
-  CONSOLE_PORT: 8001
-  # BRAIN_MOCK 开关已删除：程序里没有模拟路径，模型服务没起就明确报错
-  ADMIN_TOKEN:                   # 留空 = 控制台只允许本机(127.0.0.1)访问；要在手机/局域网开控制台，填一个口令，并在控制台右上角填同一个
+  CONSOLE_PORT: 8000             # 控制台已并入大脑进程，必须与 BRAIN_PORT 相同
+  ADMIN_TOKEN:                   # 留空 = 管理接口只允许本机/内网来源访问
 
 # ---- 数据 ----
 数据:
   DB_PATH: data/companion.db
   CHROMA_PATH: data/chroma
 
-# ---- 模型服务（模型是独立的，这里只填连到哪）----
-# 大模型 / 判断模型 / 语音模型都是各自一个 bat，大脑只管连，不管加载。
-# 关掉某个 bat = 关掉那个模型，大脑自动降级，不会挂。
-模型服务:
-  # -- 对话大模型（你自己的 bat 起，Ollama / vLLM / llama.cpp 都认）--
+# ---- 兜底值（仅在数据库里没有对应模型卡时才生效，正常不用碰）----
+兜底:
   OLLAMA_BASE: http://127.0.0.1:11434
   LLM_MODEL: qwen3:8b
-  EMBED_MODEL: bge-m3
-
-  # -- 情感判断服务：双击 4-启动情感判断.bat --
-  JUDGE_HOST: 0.0.0.0
-  JUDGE_PORT: 8101                # 改端口只改这里，下面的地址会自动跟着变
-  # JUDGE_BASE: http://127.0.0.1:8101   # 服务在别的机器上才填；留空=按端口自动拼
-  JUDGE_MODEL_PATH: models/chinese-emotion-small/model.onnx
-  JUDGE_CONTEXT_TURNS: 2
-
-  # -- 语音识别服务：双击 7-启动语音识别.bat --
-  ASR_HOST: 0.0.0.0
-  ASR_PORT: 8103                  # 改端口只改这里，下面的地址会自动跟着变
-  # ASR_BASE: http://127.0.0.1:8103     # 服务在别的机器上才填；留空=按端口自动拼
-  ASR_MODEL_DIR: models/sense-voice
-  ASR_LANGUAGE: auto              # auto=自动判断 中/英/日/韩/粤；也可写 zh 锁中文
-  ASR_TIMEOUT: 30
-  ASR_MAX_SECONDS: 60             # 单段音频上限，超过直接拒（防止传错文件）
-
-  # -- 语音合成服务：双击 5-启动语音合成.bat --
-  TTS_HOST: 0.0.0.0
-  TTS_PORT: 8102                  # 改端口只改这里
-  # TTS_BASE: http://127.0.0.1:8102     # 服务在别的机器上才填；留空=按端口自动拼
-  TTS_BACKEND: gpt_sovits        # gpt_sovits=接 GPT-SoVITS 整合包(推荐) / indextts=本地 IndexTTS-2 / proxy / openai
-  TTS_SOVITS_URL: http://127.0.0.1:9880   # gpt_sovits 专用：GPT-SoVITS 的 api_v2.py 地址
-  TTS_TEXT_LANG: zh               # gpt_sovits 专用：合成语言 zh/en/ja/ko/yue
-  TTS_MODEL_DIR: models/IndexTTS-2        # 只有 indextts 用
-  TTS_DEVICE: cuda:0              # 只有 indextts 用；没显卡改 cpu（会慢很多）
-  TTS_VOICE_DIR: models/voices    # 参考音频：sad.wav / happy.wav / default.wav ...（同目录放同名 txt 写原文）；相对路径按项目根解析
-  TTS_UPSTREAM: http://127.0.0.1:9880/tts   # 只有 TTS_BACKEND=proxy 才用
-  TTS_TIMEOUT: 60
-  TTS_FALLBACK_MOCK: true         # 语音服务没起时用内置占位音，保证对话不断
+  JUDGE_PORT: 8101
+  ASR_PORT: 8103
+  TTS_PORT: 8102
+  TTS_BACKEND: gpt_sovits
+  TTS_SOVITS_URL: http://127.0.0.1:9880
+  ASR_LANGUAGE: auto
+  ASR_MAX_SECONDS: 60

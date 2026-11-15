@@ -26,11 +26,6 @@ try:
     from brain import config_store
 except Exception:  # pragma: no cover
     config_store = None
-try:
-    from brain.services import knowledge
-except Exception:  # pragma: no cover - S1 未落地 / 配置层异常一律降级
-    knowledge = None
-
 log = logging.getLogger("brain.pipeline")
 
 _PING_INTERVAL = 15.0
@@ -43,57 +38,6 @@ _ERROR_BY_STAGE = {
     "prompt": "LLM_STREAM_FAILED",
     "llm": "LLM_STREAM_FAILED",
 }
-
-
-async def _llm_review_emotion(text: str, onnx_confidence: float) -> EmotionResult | None:
-    """用 LLM 复核情感判断。只取第一个 token，不生成完整回复。
-    
-    返回 EmotionResult 或 None（LLM 也判 neutral 或解析失败时）。
-    """
-    PROMPT = (
-        "判断这句话的情感类别（8 类里选一个：joy/sad/anger/fear/"
-        "surprise/disgust/trust/neutral）。\n"
-        f"句子：{text}\n只回复标签一个词。"
-    )
-    try:
-        chunks = []
-        async for chunk in llm.stream([{"role": "user", "content": PROMPT}], max_tokens=4):
-            chunks.append(chunk)
-        raw = "".join(chunks).strip().lower()
-        if not raw:
-            return None
-        label = raw.split()[0].strip(".,!?，。！？ ")
-        # 映射到标准 8 类（必须用 EMOTION_LABELS 里的词：joy/anger 这些
-        # 会被 normalized() 打回 neutral，导致 LLM 复核形同虚设）
-        label_map = {
-            "高兴": "happy", "快乐": "happy", "开心": "happy", "joy": "happy",
-            "happy": "happy", "excited": "happy",
-            "难过": "sad", "悲伤": "sad", "伤心": "sad", "sad": "sad", "sadness": "sad",
-            "生气": "angry", "愤怒": "angry", "气": "angry", "anger": "angry", "angry": "angry",
-            "害怕": "fear", "恐惧": "fear", "担心": "fear", "fear": "fear", "scared": "fear",
-            "惊讶": "surprised", "吃惊": "surprised", "surprise": "surprised",
-            "surprised": "surprised",
-            "厌恶": "disgust", "反感": "disgust", "disgust": "disgust",
-            "信任": "care", "感谢": "care", "trust": "care", "care": "care",
-            "平静": "neutral", "中性": "neutral", "neutral": "neutral",
-        }
-        mapped = label_map.get(label, label)
-        valid = {"happy", "sad", "angry", "fear", "surprised", "disgust",
-                 "care", "neutral"}
-        if mapped not in valid:
-            return None
-        # LLM 也判 neutral 就不覆盖（真的中性）
-        if mapped == "neutral":
-            return None
-        return EmotionResult(
-            label=mapped,
-            intensity=min(0.9, max(0.5, onnx_confidence + 0.15)),
-            confidence=min(0.95, max(0.6, onnx_confidence + 0.2)),
-            degraded=False,
-            source="llm-review",
-        ).normalized()
-    except Exception:
-        return None
 
 
 def _safe_db(fn, *args, **kwargs):
@@ -201,21 +145,51 @@ def _schedule_remember(user_text: str, emotion_label: str,
         except Exception:
             pass
         try:
-            if knowledge is not None:
-                # 不传标题：走「当天一篇纪要、追加更新」的写入粒度，
-                # 不再每句话新建一篇同名碎文档（那是知识库被写成流水账的根因）。
-                knowledge.remember(
-                    text=user_text,
-                    tags=str(emotion_label),
-                    daily=True,
-                )
-        except Exception:
-            pass
-        try:
             from brain.services import profile
             profile.maybe_refresh(user_id)
         except Exception:
             pass
+
+    try:
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(None, _do)
+        fut.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+    except Exception:
+        pass
+
+
+def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str,
+                         reply: str, history: list[dict] | None,
+                         latency_ms: float, system_text: str,
+                         runtime: dict, user_id: str) -> None:
+    """流结束后的后台功课：规则自检 + 每日摘要 + 待办识别。
+
+    全部丢线程池，绝不进 SSE 热路径；任何异常只记日志。
+    """
+    prev_reply = _prev_reply(history)
+    prev_user = ""
+    for turn in reversed(history or []):
+        if isinstance(turn, dict) and str(turn.get("role")) == "user":
+            prev_user = str(turn.get("content") or "")
+            break
+    assistant_name = str((runtime or {}).get("assistant_name") or "").strip()
+
+    def _do() -> None:
+        try:
+            from brain.services import checks, digest
+
+            rules, verdict = checks.check_reply(
+                reply=reply, prev_reply=prev_reply, user_text=user_text,
+                prev_user=prev_user, latency_ms=latency_ms,
+                assistant_name=assistant_name, system_prompt=system_text,
+            )
+            db.log_check(request_id=request_id, turn_id=turn_id, rules=rules,
+                         verdict=verdict, latency_ms=latency_ms)
+            if user_text:
+                digest.detect_open_loop(user_text, user_id)
+            digest.rebuild_episode(user_id)
+        except Exception:
+            log.exception("流后后台任务失败（自检/摘要）")
 
     try:
         loop = asyncio.get_running_loop()
@@ -284,16 +258,6 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             await asyncio.to_thread(judge.judge, req.text, history)
         ).normalized()
 
-        # ---- 1.5) LLM 自动复核 ----
-        # 触发条件：ONNX 判 neutral 时一律让 LLM 过一下
-        # ONNX 对短句容易过度自信判 neutral，LLM 能更好识别隐含情绪
-        try:
-            if emotion.label == "neutral":
-                reviewed = await _llm_review_emotion(req.text, emotion.confidence)
-                if reviewed is not None:
-                    emotion = reviewed
-        except Exception:
-            pass  # LLM 复核失败不影响主流程
         degraded = bool(emotion.degraded)
 
         # ---- 2) 开流前同步落库，拿 event_id ----
@@ -377,7 +341,11 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             top_k = int(effective_params.get("memory_top_k", settings.MEMORY_TOP_K))
         except (TypeError, ValueError):
             top_k = settings.MEMORY_TOP_K
-        bundle = memory.retrieve(req.user_id, req.text, top_k) or {}
+        # 必须放线程池：memory.retrieve 内部是同步 SQLite 读，
+        # 直接在事件循环里跑会卡住整条 SSE（历史上知识库 ev.wait(2.0) 就是这么卡的）。
+        bundle = await asyncio.to_thread(
+            memory.retrieve, req.user_id, req.text, top_k
+        ) or {}
 
         # ---- 5) 组装 prompt（请求级快照）----
         stage = "prompt"
@@ -499,6 +467,18 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # 平淡的日常对话才是画像的主体，之前按 intensity 卡死导致几乎不落记忆。
         if auto_remember and _worth_remembering(req.text):
             _schedule_remember(req.text, emotion.label, req.user_id, req.session_id)
+        # 自检 / 摘要 / 待办：后台线程，不影响这一轮的 done 帧
+        _schedule_after_turn(
+            request_id=request_id,
+            turn_id=turn_id,
+            user_text=req.text,
+            reply="".join(reply),
+            history=history,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            system_text=((messages[0].get("content") if messages else "") or ""),
+            runtime=runtime,
+            user_id=req.user_id,
+        )
 
     except asyncio.CancelledError:
         # 客户端断连：不吞掉取消，交给 finally 补标 truncated

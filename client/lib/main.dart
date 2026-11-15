@@ -6,16 +6,19 @@ import 'package:flutter/services.dart';
 
 import 'chat_provider.dart';
 import 'config.dart';
+import 'ink_drop.dart';
 import 'system_shell.dart';
+import 'theme.dart';
 
-// ---- 配色：深夜暖木。底色压到近黑，只有形象区和强调色带一点暖光 ----
-const Color _bgTop = Color(0xFF17130F);
-const Color _bgBottom = Color(0xFF0C0A09);
-const Color _surface = Color(0xFF221C17);
-const Color _textPrimary = Color(0xFFF3EBE1);
-const Color _textMuted = Color(0xFF94897D);
-const Color _accent = Color(0xFFE9A96A);
-const Color _danger = Color(0xFFE0705F);
+// ---- 配色：米白纸感 + 墨色 + 一处陶土橙 ----
+// 全部来自 theme.dart；这里只是给旧代码留的别名，不要在别处再写死色值。
+const Color _bgTop = Palette.paper;
+const Color _bgBottom = Palette.paperDeep;
+const Color _surface = Palette.card;
+const Color _textPrimary = Palette.textPrimary;
+const Color _textMuted = Palette.textMuted;
+const Color _accent = Palette.terracotta;
+const Color _danger = Color(0xFFC05A4D);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,15 +58,16 @@ class _CompanionAppState extends State<CompanionApp> {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
-        brightness: Brightness.dark,
-        colorScheme: const ColorScheme.dark(
-          primary: _accent,
-          surface: _surface,
+        brightness: Brightness.light,
+        colorScheme: const ColorScheme.light(
+          primary: Palette.terracotta,
+          surface: Palette.card,
           error: _danger,
         ),
-        scaffoldBackgroundColor: _bgTop,
+        scaffoldBackgroundColor: Palette.paper,
         splashFactory: NoSplash.splashFactory,
-        fontFamilyFallback: const <String>['Noto Sans CJK SC', 'sans-serif'],
+        // 衬线只在标题/正文大段文字上启用；控件仍是无衬线，长读不累。
+        fontFamilyFallback: const <String>['Noto Serif CJK SC', 'sans-serif'],
       ),
       home: ChatScreen(chat: _chat),
     );
@@ -1154,321 +1158,25 @@ class _IconTap extends StatelessWidget {
   }
 }
 
-// ---------------- 玩偶 ----------------
+// ---------------- 角色：一滴墨 ----------------
 
-/// 会呼吸、会眨眼、说话时嘴巴一张一合的小玩偶。
-class _Doll extends StatefulWidget {
-  const _Doll({required this.mood, required this.talking});
+/// 非人形角色。没有五官、没有四肢，所以不存在「像不像人」的问题。
+/// 呼吸=它在；说话起涟漪=它在说；分裂出薄片=它把东西递到你手上。
+class _Doll extends StatelessWidget {
+  const _Doll({required this.mood, required this.talking, this.delivering = false});
 
   final _Mood mood;
   final bool talking;
-
-  @override
-  State<_Doll> createState() => _DollState();
-}
-
-class _DollState extends State<_Doll> with TickerProviderStateMixin {
-  /// 呼吸：慢，控制整体起伏和光晕。
-  late final AnimationController _breath = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 4200),
-  )..repeat();
-
-  /// 眨眼：4.6 秒一轮，其中最后一小段完成一次闭合。
-  late final AnimationController _blink = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 4600),
-  )..repeat();
-
-  /// 说话：嘴巴开合的频率。
-  late final AnimationController _mouth = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 900),
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.talking) _mouth.repeat();
-  }
-
-  @override
-  void didUpdateWidget(covariant _Doll oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.talking && !_mouth.isAnimating) {
-      _mouth.repeat();
-    } else if (!widget.talking && _mouth.isAnimating) {
-      _mouth.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    _breath.dispose();
-    _blink.dispose();
-    _mouth.dispose();
-    super.dispose();
-  }
+  final bool delivering;
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 158,
-      height: 158,
-      child: AnimatedBuilder(
-        animation: Listenable.merge(
-          <Listenable>[_breath, _blink, _mouth],
-        ),
-        builder: (BuildContext context, _) {
-          // 眨眼的闭合量：大部分时间是 0，接近循环末尾迅速闭合再张开。
-          final double b = _blink.value;
-          final double blink = b > 0.90
-              ? (1 - (b - 0.90) / 0.10).clamp(0.0, 1.0)
-              : 0.0;
-          final double mouth = widget.talking
-              ? 0.5 + 0.5 * math.sin(_mouth.value * 2 * math.pi)
-              : 0.0;
-          return CustomPaint(
-            painter: _DollPainter(
-              mood: widget.mood,
-              breath: _breath.value,
-              blink: 1 - blink,
-              mouth: mouth,
-              talking: widget.talking,
-            ),
-          );
-        },
-      ),
+    return InkDrop(
+      tint: mood.tint,
+      smile: mood.smile,
+      talking: talking,
+      delivering: delivering,
+      size: 150,
     );
-  }
-}
-
-class _DollPainter extends CustomPainter {
-  _DollPainter({
-    required this.mood,
-    required this.breath,
-    required this.blink,
-    required this.mouth,
-    required this.talking,
-  });
-
-  final _Mood mood;
-
-  /// 0～1 循环，用来做呼吸起伏。
-  final double breath;
-
-  /// 眼皮闭合比例：1 = 完全睁开，0 = 闭上。
-  final double blink;
-
-  /// 嘴巴张开量 0～1。
-  final double mouth;
-
-  final bool talking;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final double w = size.width;
-    final double h = size.height;
-    final double cx = w / 2;
-    final double bob = math.sin(breath * 2 * math.pi) * 2.2;
-    canvas.save();
-    canvas.translate(0, bob);
-
-    // 地面影子
-    final Paint shadow = Paint()
-      ..color = Colors.black.withValues(alpha: 0.30)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 9);
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(cx, h * 0.90),
-        width: w * 0.46,
-        height: h * 0.075,
-      ),
-      shadow,
-    );
-
-    // 说话时外圈有一道缓慢转动的光弧
-    if (talking) {
-      final Paint halo = Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.6
-        ..strokeCap = StrokeCap.round
-        ..color = mood.tint.withValues(alpha: 0.35);
-      canvas.drawArc(
-        Rect.fromCenter(
-          center: Offset(cx, h * 0.48),
-          width: w * 0.84,
-          height: h * 0.86,
-        ),
-        breath * 2 * math.pi,
-        1.5,
-        false,
-        halo,
-      );
-    }
-
-    // 身体：一颗竖着的圆润小石
-    final Rect bodyRect = Rect.fromCenter(
-      center: Offset(cx, h * 0.50),
-      width: w * 0.60,
-      height: h * 0.74,
-    );
-    final RRect body = RRect.fromRectAndRadius(
-      bodyRect,
-      Radius.circular(w * 0.30),
-    );
-
-    canvas.drawRRect(
-      body,
-      Paint()
-        ..shader = LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: <Color>[
-            Color.lerp(mood.tint, Colors.white, 0.42)!,
-            Color.lerp(mood.tint, Colors.black, 0.18)!,
-          ],
-        ).createShader(bodyRect),
-    );
-
-    // 顶部高光
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: Offset(cx - w * 0.10, h * 0.28),
-        width: w * 0.20,
-        height: h * 0.09,
-      ),
-      Paint()
-        ..color = Colors.white.withValues(alpha: 0.30)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
-    );
-
-    final double eyeY = h * 0.44;
-    final double eyeDx = w * 0.115;
-    final double eyeW = w * 0.105;
-    final double eyeH = h * 0.085;
-
-    // 腮红
-    final Paint blush = Paint()
-      ..color = const Color(0xFFE0705F).withValues(alpha: 0.20)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
-    canvas.drawCircle(Offset(cx - w * 0.20, h * 0.545), w * 0.055, blush);
-    canvas.drawCircle(Offset(cx + w * 0.20, h * 0.545), w * 0.055, blush);
-
-    for (final double dir in <double>[-1, 1]) {
-      final Offset center = Offset(cx + dir * eyeDx, eyeY);
-
-      // 眼白
-      canvas.drawOval(
-        Rect.fromCenter(center: center, width: eyeW, height: eyeH),
-        Paint()..color = const Color(0xFFFFFBF5).withValues(alpha: 0.96),
-      );
-      // 眼珠
-      canvas.drawCircle(
-        center.translate(0, eyeH * 0.05),
-        eyeW * 0.30,
-        Paint()..color = const Color(0xFF3B2C22),
-      );
-      // 高光
-      canvas.drawCircle(
-        center.translate(-eyeW * 0.10, -eyeH * 0.10),
-        eyeW * 0.10,
-        Paint()..color = Colors.white.withValues(alpha: 0.9),
-      );
-
-      // 眨眼：用身体色从上往下盖住眼睛
-      if (blink < 0.99) {
-        final double lidH = eyeH * (1 - blink) * 1.05;
-        canvas.save();
-        canvas.clipRRect(body);
-        canvas.drawRect(
-          Rect.fromLTWH(
-            center.dx - eyeW * 0.62,
-            center.dy - eyeH * 0.62,
-            eyeW * 1.24,
-            lidH,
-          ),
-          Paint()
-            ..color = Color.lerp(mood.tint, Colors.white, 0.30)!,
-        );
-        canvas.restore();
-        // 闭眼时画一条线，更像眼皮
-        if (blink < 0.12) {
-          canvas.drawLine(
-            Offset(center.dx - eyeW * 0.32, center.dy),
-            Offset(center.dx + eyeW * 0.32, center.dy),
-            Paint()
-              ..color = const Color(0xFF4A382C).withValues(alpha: 0.7)
-              ..strokeWidth = 1.6
-              ..strokeCap = StrokeCap.round,
-          );
-        }
-      }
-
-      // 眉毛：开心时外高内低，难过 / 生气时反过来
-      final double tilt = -mood.smile * 0.22;
-      final Offset inner = Offset(
-        center.dx - dir * eyeW * 0.46,
-        center.dy - eyeH * 0.95 + tilt * eyeH,
-      );
-      final Offset outer = Offset(
-        center.dx + dir * eyeW * 0.46,
-        center.dy - eyeH * 0.95 - tilt * eyeH,
-      );
-      canvas.drawLine(
-        inner,
-        outer,
-        Paint()
-          ..color = const Color(0xFF5B4334).withValues(alpha: 0.55)
-          ..strokeWidth = 2.0
-          ..strokeCap = StrokeCap.round,
-      );
-    }
-
-    // 嘴巴
-    final Offset mouthCenter = Offset(cx, h * 0.605);
-    final Paint mouthPaint = Paint()
-      ..color = const Color(0xFF5B3A2C).withValues(alpha: 0.85)
-      ..style = PaintingStyle.fill;
-
-    if (talking) {
-      final double openH = h * (0.012 + 0.055 * mouth);
-      canvas.drawOval(
-        Rect.fromCenter(
-          center: mouthCenter,
-          width: w * 0.10,
-          height: openH,
-        ),
-        mouthPaint,
-      );
-    } else {
-      final Path smile = Path()..moveTo(cx - w * 0.055, mouthCenter.dy);
-      final double depth = h * 0.030 * mood.smile;
-      smile.quadraticBezierTo(
-        cx,
-        mouthCenter.dy + depth,
-        cx + w * 0.055,
-        mouthCenter.dy,
-      );
-      canvas.drawPath(
-        smile,
-        Paint()
-          ..color = const Color(0xFF5B3A2C).withValues(alpha: 0.8)
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.0
-          ..strokeCap = StrokeCap.round,
-      );
-    }
-
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _DollPainter old) {
-    return old.breath != breath ||
-        old.blink != blink ||
-        old.mouth != mouth ||
-        old.talking != talking ||
-        old.mood != mood;
   }
 }

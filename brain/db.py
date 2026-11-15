@@ -97,6 +97,49 @@ CREATE TABLE IF NOT EXISTS user_profile (
     turns      INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+-- 每日摘要（情景记忆）：一晚一行，热路径每轮都带，替代「检索回来才想起来」。
+CREATE TABLE IF NOT EXISTS episodes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    day        TEXT NOT NULL,
+    text       TEXT NOT NULL DEFAULT '',
+    turns      INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, day)
+);
+
+-- 未完成的事：他提过但还没收尾的话题，可以主动开口用一次。
+CREATE TABLE IF NOT EXISTS open_loops (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 规则自检结果：判官是规则，不是模型。
+CREATE TABLE IF NOT EXISTS turn_checks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    request_id TEXT,
+    turn_id    INTEGER,
+    rules      TEXT NOT NULL DEFAULT '[]',
+    verdict    TEXT NOT NULL DEFAULT 'pass',
+    latency_ms REAL,
+    note       TEXT NOT NULL DEFAULT ''
+);
+
+-- 反馈信号：显式（对了/不对）与隐式（打断/重说/续聊）统一入库。
+CREATE TABLE IF NOT EXISTS feedback (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    request_id TEXT,
+    kind       TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    target     TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -519,7 +562,198 @@ def stats() -> dict:
             "personas": _n("persona_templates"),
             "facts": _n("facts"),
             "judge_logs": _n("judge_logs"),
+            "episodes": _n("episodes"),
+            "open_loops": _n("open_loops"),
+            "turn_checks": _n("turn_checks"),
+            "feedback": _n("feedback"),
             "active_persona": get_active_persona().get("name"),
         }
+    finally:
+        conn.close()
+
+
+# ---------- 记忆层：每日摘要 ----------
+
+def upsert_episode(user_id: str, day: str, text: str, turns: int = 0) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO episodes(user_id,day,text,turns,updated_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(user_id,day) DO UPDATE SET text=excluded.text, "
+            "turns=excluded.turns, updated_at=excluded.updated_at",
+            (user_id, day, str(text or ""), int(turns), _now()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_recent_episodes(user_id: str, days: int = 3) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT day,text,turns FROM episodes WHERE user_id=? "
+            "ORDER BY day DESC LIMIT ?", (user_id, max(1, int(days))),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def day_rows(user_id: str, day: str) -> list[dict]:
+    """当天发生过的事（用户原话摘要 + 情绪）。用于拼每日摘要，不做任何模型生成。"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT timestamp,emotion_label,intensity,summary,reply_text FROM emotion_events "
+            "WHERE user_id=? AND timestamp>=? AND timestamp<? ORDER BY id ASC",
+            (user_id, day + " 00:00:00", day + " 23:59:59"),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------- 记忆层：未完成的事 ----------
+
+def add_open_loop(user_id: str, text: str, keep: int = 10) -> None:
+    """记一件他提过、还没收尾的事；同文去重，只保留最近 keep 条 open。"""
+    cleaned = str(text or "").strip()
+    if len(cleaned) < 6:
+        return
+    conn = connect()
+    try:
+        dup = conn.execute(
+            "SELECT id FROM open_loops WHERE user_id=? AND status='open' AND text=?",
+            (user_id, cleaned),
+        ).fetchone()
+        if dup:
+            return
+        conn.execute(
+            "INSERT INTO open_loops(user_id,text,status,created_at,updated_at) "
+            "VALUES(?,?,'open',?,?)", (user_id, cleaned, _now(), _now()),
+        )
+        rows = conn.execute(
+            "SELECT id FROM open_loops WHERE user_id=? AND status='open' ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+        for r in rows[int(keep):]:
+            conn.execute("UPDATE open_loops SET status='dropped', updated_at=? WHERE id=?",
+                         (_now(), int(r["id"])))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_open_loops(user_id: str, limit: int = 3) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id,text,created_at FROM open_loops WHERE user_id=? AND status='open' "
+            "ORDER BY id DESC LIMIT ?", (user_id, int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def resolve_open_loop(loop_id: int, status: str = "done") -> bool:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "UPDATE open_loops SET status=?, updated_at=? WHERE id=?",
+            (str(status), _now(), int(loop_id)),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+# ---------- 质量自检 ----------
+
+def log_check(*, request_id: str, turn_id: int | None, rules: list[str],
+              verdict: str, latency_ms: float, note: str = "") -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO turn_checks(created_at,request_id,turn_id,rules,verdict,latency_ms,note) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (_now(), request_id, turn_id,
+             json.dumps(rules or [], ensure_ascii=False), str(verdict),
+             float(latency_ms), str(note or "")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def recent_checks(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM turn_checks ORDER BY id DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def checks_summary(days: int = 7) -> dict:
+    """最近 N 天的自检概览：不合格率 + 各规则命中次数。"""
+    since = (datetime.datetime.now() - datetime.timedelta(days=int(days))
+             ).strftime("%Y-%m-%d %H:%M:%S")
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT verdict,rules,latency_ms FROM turn_checks WHERE created_at>=?",
+            (since,),
+        ).fetchall()
+    finally:
+        conn.close()
+    total = len(rows)
+    fails = sum(1 for r in rows if str(r["verdict"]) != "pass")
+    hits: dict[str, int] = {}
+    for r in rows:
+        try:
+            for name in json.loads(r["rules"] or "[]"):
+                hits[str(name)] = hits.get(str(name), 0) + 1
+        except Exception:
+            continue
+    lat = [float(r["latency_ms"] or 0) for r in rows]
+    lat.sort()
+    p50 = lat[len(lat) // 2] if lat else 0.0
+    return {
+        "days": int(days),
+        "total": total,
+        "fails": fails,
+        "fail_rate": round(fails / total, 4) if total else 0.0,
+        "rules": dict(sorted(hits.items(), key=lambda kv: kv[1], reverse=True)),
+        "latency_p50_ms": round(p50, 1),
+    }
+
+
+# ---------- 反馈 ----------
+
+def add_feedback(*, request_id: str, kind: str, reason: str = "",
+                 target: str = "") -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO feedback(created_at,request_id,kind,reason,target) VALUES(?,?,?,?,?)",
+            (_now(), str(request_id or ""), str(kind), str(reason or ""), str(target or "")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def recent_feedback(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()

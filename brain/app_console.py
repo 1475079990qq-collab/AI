@@ -1,62 +1,25 @@
-"""控制平面独立进程 (:8001)。
+"""【已废弃的兼容入口】控制台已并入大脑进程。
 
-与实时链路 (:8000, brain.app_brain) 进程级隔离，只共享 data/companion.db，
-不 import / 不挂载 brain.routers.chat，两个 app 不合并。
+保留这个文件只是为了：旧启动脚本误点时给一句明确指引，而不是报 404。
+它不再挂载任何业务路由，也不再写数据库 —— 所有控制面都在 :8000 的 /api/admin/*。
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse
 
-from brain import db
-from brain.config import settings
-from brain.routers import admin
+app = FastAPI(title="companion console (deprecated)")
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    db.init_db()
-    from brain import config_store
-    config_store.init_store()
-    yield
-
-
-app = FastAPI(title="companion console", lifespan=_lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],      # 允许写操作 + OPTIONS 预检
-    allow_headers=["*"],      # 放行自定义头 X-Admin-Token
-)
-
-# 控制平面 API
-app.include_router(admin.router)
-
-
-# 存活检查
-@app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok", "service": "console"}
-
-
-# 根路径指向 admin.html；web/ 由 C 负责，目录当前可能为空，重定向不报 500
-@app.get("/")
-def root():
-    index = settings.WEB_DIR / "admin.html"
-    if index.exists():
-        return FileResponse(index)
-    return RedirectResponse(url="/admin.html")
-
-
-# 静态目录最后挂载，避免遮蔽上面的具体路由；check_dir=False 容忍空目录
-app.mount(
-    "/",
-    StaticFiles(directory=str(settings.WEB_DIR), html=True, check_dir=False),
-    name="web",
-)
+@app.get("/{path:path}")
+def _moved(path: str = ""):
+    return HTMLResponse(
+        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<title>控制台已合并</title></head>"
+        "<body style='font-family:sans-serif;padding:40px'>"
+        "<h2>控制台已经并进大脑了</h2>"
+        "<p>不需要再单独启动这个进程。打开 "
+        "<a href='http://127.0.0.1:8000/admin.html'>http://127.0.0.1:8000/admin.html</a> "
+        "即可。</p></body></html>",
+        status_code=200,
+    )
