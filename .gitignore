@@ -1,0 +1,13 @@
+.venv/
+models/
+client/build/
+client/.dart_tool/
+data/
+update/
+__pycache__/
+*.pyc
+*.apk
+*.log
+_s_*.png
+_shot_*.png
+_run.txt

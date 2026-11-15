@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>情感陪伴 · 对话</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="page-chat">
+<header class="topbar">
+  <div class="topbar-row">
+    <h1 class="brand">情感陪伴</h1>
+    <div class="badges">
+      <span id="emotion-badge" class="badge" data-emotion="neutral">平静</span>
+      <span id="meta-info" class="meta-info">未连接</span>
+    </div>
+    <div class="top-actions">
+      <a class="link" id="admin-link" href="admin.html">控制台</a>
+      <button type="button" id="clear-btn" class="btn btn-ghost">清空会话</button>
+    </div>
+  </div>
+  <div class="topbar-row server-row">
+    <label class="server-label" for="server-input">服务器</label>
+    <input id="server-input" class="server-input" type="url" spellcheck="false" placeholder="http://localhost:8000">
+    <button type="button" id="server-save" class="btn btn-ghost">保存</button>
+    <span id="server-hint" class="server-hint"></span>
+  </div>
+</header>
+
+<main id="messages" class="messages" aria-live="polite"></main>
+
+<footer class="composer">
+  <button type="button" id="mic-btn" class="btn mic-btn" title="按住说话（松手转成文字）" aria-label="按住说话">
+    <span class="mic-ico" aria-hidden="true">🎤</span>
+    <span class="mic-label">按住说话</span>
+  </button>
+  <textarea id="input" class="composer-input" rows="1" title="回车发送，Shift+回车换行" placeholder="说点什么…（回车发送）"></textarea>
+  <button type="button" id="send-btn" class="btn btn-primary">发送</button>
+</footer>
+
+<audio id="tts-player" preload="none"></audio>
+
+<script src="config.local.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
