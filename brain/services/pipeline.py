@@ -393,6 +393,8 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                   episodes=len(bundle.get("episodes") or []),
                   open_loops=len(bundle.get("open_loops") or []),
                   source=str(bundle.get("source") or ""),
+                  # 这一轮到底「想起了哪几条」：脑图据此点亮对应的神经元，并带出联想
+                  ids=[str(f.get("id")) for f in (bundle.get("facts") or []) if f.get("id")][:6],
                   ms=round((time.perf_counter() - _t_mem) * 1000.0, 1))
 
         # ---- 5) 组装 prompt（请求级快照）----

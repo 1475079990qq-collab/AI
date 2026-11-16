@@ -31,6 +31,9 @@
   var edges = [];
   var adj = [];
   var cascade = [];
+  var memAnchors = {};       // fact id → 记忆区里的「那一颗」神经元
+  var assocPairs = [];       // 共享两字词的 facts = 真实联想（召回本身也是按 bigram 打的）
+  var factTotal = 0;
   var lastTurnMs = null;
   var evCount = 0;
   var firedTotal = 0;
@@ -170,6 +173,60 @@
     }
   }
 
+  function hashStr(s) {
+    var h = 2166136261;
+    for (var i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  // 把真实 facts 挂到记忆区的神经元上；共享两字词的两条事实之间连一根「联想」
+  function assignFacts(facts) {
+    memAnchors = {};
+    assocPairs = [];
+    factTotal = facts.length;
+    var memIds = [];
+    neurons.forEach(function (n, i) { if (n.region === 2) memIds.push(i); });
+    if (!memIds.length) return;
+    var grams = {};
+    facts.forEach(function (f) {
+      var id = String(f.id || '');
+      if (!id) return;
+      memAnchors[id] = memIds[hashStr(id) % memIds.length];
+      var text = String(f.text || '');
+      for (var i = 0; i + 1 < text.length; i++) {
+        var g = text.slice(i, i + 2);
+        if (grams[g] === undefined) grams[g] = [];
+        if (grams[g].length < 6 && grams[g].indexOf(id) < 0) grams[g].push(id);
+      }
+    });
+    Object.keys(grams).forEach(function (g) {
+      var ids = grams[g];
+      for (var a = 0; a < ids.length; a++) {
+        for (var b = a + 1; b < ids.length; b++) {
+          var x = memAnchors[ids[a]], y = memAnchors[ids[b]];
+          if (x !== undefined && y !== undefined && x !== y) assocPairs.push([x, y]);
+        }
+      }
+    });
+    assocPairs = assocPairs.slice(0, 4000);
+    var load = document.getElementById('fact-load');
+    if (load) load.textContent = factTotal + ' 条事实已接入';
+  }
+
+  function loadFacts() {
+    var token = '';
+    try { token = localStorage.getItem('companion.admin_token') || ''; } catch (e) { /* noop */ }
+    fetch('/api/admin/facts?limit=200', { headers: token ? { 'X-Admin-Token': token } : {} })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        assignFacts(Array.isArray(d) ? d : (d.items || []));
+      })
+      .catch(function () { /* 读不到事实就只按条数放电，不影响直播 */ });
+  }
+
   function regionOf(kind) {
     switch (kind) {
       case 'turn_start': return 0;
@@ -239,15 +296,24 @@
       REGIONS[ri].value = describe(ev);
       REGIONS[ri].count = (REGIONS[ri].count || 0) + 1;
       fire(ri, magnitude(ev), now);
-      // 真实链路的下一站：事件本来就按顺序来，等下一事件到达时自然接上，
-      // 这里只补一小股「前向投射」，让联络看起来是脑区之间传，不是单点闪。
-      var next = (ri + 1) % REGIONS.length;
-      for (var k = 0; k < 3; k++) {
-        var pool = neurons.filter(function (n) { return n.region === next; });
-        if (!pool.length) break;
-        var pick = pool[Math.floor(Math.random() * pool.length)];
-        cascade.push({ i: neurons.indexOf(pick), due: now + 60 + k * 45, hops: 1, energy: .5 });
+      // 记忆不是「整片一起亮」：先点亮这次真正召回的几条，再顺着联想带出一串
+      if (ev.kind === 'memory' && ev.ids && ev.ids.length) {
+        ev.ids.forEach(function (id, k) {
+          var anchor = memAnchors[String(id)];
+          if (anchor === undefined) return;
+          cascade.push({ i: anchor, due: now + 18 + k * 22, hops: 0, energy: 1.05 });
+        });
+        var touched = ev.ids.map(function (id) { return memAnchors[String(id)]; });
+        for (var p = 0; p < assocPairs.length; p++) {
+          var pair = assocPairs[p];
+          if (touched.indexOf(pair[0]) >= 0) {
+            cascade.push({ i: pair[1], due: now + 90, hops: 1, energy: .55 });
+          } else if (touched.indexOf(pair[1]) >= 0) {
+            cascade.push({ i: pair[0], due: now + 90, hops: 1, energy: .55 });
+          }
+        }
       }
+      // 不再凭空「投射到下一区」：联络只沿真实突触（adj）传，事件本身按真实时序到达
     }
     if (ev.kind === 'turn_done' || ev.kind === 'turn_error') {
       lastTurnMs = ev.ms || null;
@@ -268,6 +334,23 @@
     bg.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
+
+    // 脑廓：一颗脑的外缘 + 一条纵裂（不叠两个圈，避免看起来像两个靶子）
+    ctx.save();
+    var cx2 = W * 0.53, cy2 = H * 0.45, rx = W * 0.315, ry = H * 0.285;
+    ctx.beginPath();
+    ctx.ellipse(cx2, cy2, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(86,150,140,.032)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,200,185,.075)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx2, cy2 - ry * 0.95);
+    ctx.quadraticCurveTo(cx2 + W * 0.008, cy2 - ry * 0.2, cx2, cy2 + ry * 0.62);
+    ctx.strokeStyle = 'rgba(120,200,185,.06)';
+    ctx.stroke();
+    ctx.restore();
 
     // 突触：冷线一次批量画，热线单独画，成本可控
     ctx.strokeStyle = 'rgba(150,178,172,.085)';
@@ -294,6 +377,20 @@
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+
+    // 联想：共享两字词的事实之间那根线（只在有相关事实时才画，冷态很淡）
+    if (assocPairs.length) {
+      ctx.strokeStyle = 'rgba(170,145,215,.075)';
+      ctx.lineWidth = 0.75;
+      ctx.beginPath();
+      for (var q = 0; q < assocPairs.length; q++) {
+        var P1 = neurons[assocPairs[q][0]], P2 = neurons[assocPairs[q][1]];
+        if (!P1 || !P2) continue;
+        ctx.moveTo(P1.x, P1.y);
+        ctx.lineTo(P2.x, P2.y);
+      }
+      ctx.stroke();
+    }
 
     // 放电队列
     for (var c = cascade.length - 1; c >= 0; c--) {
@@ -323,9 +420,12 @@
     // 神经元
     var breath = 0.5 + 0.5 * Math.sin(now / 2400);
     var peak = 0;
+    var active = Date.now() - lastEventAt < 4000;   // 正在想/说的时候，注意力只落在放电区
     for (var i = 0; i < neurons.length; i++) {
       var n = neurons[i];
-      if (!HOLD) n.heat *= Math.exp(-dt / 1.35);   // 后像约 1.9 秒：话停了，余温还在退
+      // 记忆的余温更长：想起过的事会在心里留得久一点（其余按 1.9 秒退）
+      var tau = n.region === 2 ? 5.2 : 1.35;
+      if (!HOLD) n.heat *= Math.exp(-dt / tau);
       if (n.heat > peak) peak = n.heat;
       var hot = n.heat > 0.06;
       var r = n.size + (hot ? n.heat * 1.7 : 0);
@@ -345,7 +445,7 @@
         }
       } else {
         // 静息神经元：能看见这一整片脑，但不喧宾夺主
-        ctx.fillStyle = 'rgba(186,210,205,' + (0.16 + breath * 0.05) + ')';
+        ctx.fillStyle = 'rgba(186,210,205,' + ((active ? 0.09 : 0.16) + breath * 0.05) + ')';
         ctx.beginPath();
         ctx.arc(n.x, n.y, n.size, 0, Math.PI * 2);
         ctx.fill();
@@ -457,6 +557,7 @@
   })();
 
   build();
+  loadFacts();
   resize();
   renderLegend();
   window.addEventListener('resize', function () { resize(); });
