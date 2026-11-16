@@ -86,7 +86,7 @@ PROVIDER_FIELDS: dict[str, list[dict[str, Any]]] = {
     ],
     "judge": [
         F("engine", "判断引擎", "select", "http",
-          "「独立服务」= 调 4 号 bat 起的判断服务（推荐）；「跟随独立服务」= 同上，兼容旧配置；"
+          "「独立服务」= 调独立判断服务（推荐）；「跟随独立服务」= 同上，兼容旧配置；"
           "「进程内加载」= 直接在大脑里跑，会多吃 1~2G 内存；「只用关键词」= 不加载模型",
           ["http", "auto", "onnx", "rule"]),
         F("endpoint", "判断服务地址", "text", "",
@@ -103,10 +103,10 @@ PROVIDER_FIELDS: dict[str, list[dict[str, Any]]] = {
     ],
     "asr": [
         F("api_style", "接口形态", "select", "custom",
-          "「自定义地址」= 我们自己的识别服务（7 号 bat 起的，填服务地址就行）；"
+          "「自定义地址」= 我们自己的识别服务（独立启动脚本已归档到 `_旧启动脚本/`，填服务地址就行）；"
           "「云端接口」= OpenAI 风格的 /audio/transcriptions 接口", ["openai", "custom"]),
         F("base_url", "服务地址", "text", "http://127.0.0.1:8103",
-          "7-启动语音识别.bat 起的识别服务（sherpa-onnx + SenseVoice，纯 CPU）"),
+          "独立识别服务（sherpa-onnx + SenseVoice，纯 CPU）；独立启动脚本已归档到 `_旧启动脚本/`"),
         F("endpoint", "接口路径", "text", "/asr", "填完整 URL 则忽略服务地址"),
         F("api_key", "密钥", "text", "", "", secret=True),
         F("model", "模型", "text", "sensevoice-small", "多语种，229MB int8，不占显存"),
@@ -119,10 +119,10 @@ PROVIDER_FIELDS: dict[str, list[dict[str, Any]]] = {
     ],
     "tts": [
         F("api_style", "接口形态", "select", "custom",
-          "「自定义地址」= 我们自己的语音服务（5 号 bat / GPT-SoVITS 适配层，填服务地址就行）；"
+          "「自定义地址」= 独立语音服务 / GPT-SoVITS 适配层（独立启动脚本已归档到 `_旧启动脚本/`，填服务地址就行）；"
           "「云端接口」= OpenAI 风格的 /audio/speech 接口", ["openai", "custom"]),
         F("base_url", "服务地址", "text", "http://127.0.0.1:8102",
-          "5-启动语音合成.bat 起的语音服务；也可指向已有的 GPT-SoVITS 适配层"),
+          "默认走进程内语音引擎；如需接独立 GPT-SoVITS 适配层可填服务地址，独立启动脚本已归档到 `_旧启动脚本/`"),
         F("endpoint", "接口路径", "text", "/tts", "填完整 URL 则忽略服务地址"),
         F("api_key", "密钥", "text", "", "", secret=True),
         F("model", "模型 / 版本", "text", "IndexTTS-2", ""),
@@ -375,7 +375,7 @@ def _migrate_model_services(conn) -> None:
       judge.engine: rule → http（只有当判断服务地址能连上时才改，避免瞎切）
 
     为什么值得改：9880 是 GPT-SoVITS 的常用端口，我们自己的语音服务在 8102；
-    留着 9880 会让「明明起了 5-启动语音合成.bat 却连不上」这种问题反复出现。
+    留着 9880 会让「明明起了独立语音服务却连不上」这种问题反复出现。
     """
     try:
         from .config import settings

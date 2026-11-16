@@ -1,7 +1,7 @@
 """语音识别：把用户说的话转成文字。
 
-模型是独立进程（7-启动语音识别.bat，:8103），这里只做转发和降级判断，
-大脑进程不 import sherpa_onnx、不加载权重。
+识别服务可选、独立于大脑进程（:8103），这里只做转发和降级判断，
+大脑进程不 import sherpa_onnx、不加载权重。独立启动脚本已归档到 `_旧启动脚本/`。
 
 服务没起时返回 ok=False，路由给前端一句「语音识别没开」，
 打字聊天完全不受影响——和小智那种「ASR 挂了整条链路就断」不一样。
@@ -13,7 +13,7 @@ import httpx
 from brain.config import settings
 from brain.services import model_status
 
-_DOWN_HINT = "语音识别服务没启动（双击 7-启动语音识别.bat）"
+_DOWN_HINT = "语音识别服务没启动（可选服务；独立启动脚本已归档到 `_旧启动脚本/`）"
 
 
 def status(force: bool = False) -> dict:

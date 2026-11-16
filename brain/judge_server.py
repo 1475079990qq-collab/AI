@@ -10,7 +10,7 @@
 
 启动
 ----
-    4-启动情感判断.bat                 （等价于 python -m brain.judge_server）
+    独立调试运行：python -m brain.judge_server（原 4-启动情感判断.bat 已归档到 `_旧启动脚本/`）
 
 接口
 ----

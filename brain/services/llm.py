@@ -65,7 +65,10 @@ def _cfg() -> dict:
         return {k: v for k, v in raw.items()
                 if k not in {"code", "name", "category", "enabled", "mode",
                              "version", "updated_at", "fields"}}
-    except Exception:
+    except Exception as exc:
+        # 读卡异常不能静默：留痕，下游会落到 yaml 兜底地址/模型。
+        log.warning("读取模型卡配置异常，将回退 yaml 兜底（%s: %s）",
+                    type(exc).__name__, exc)
         return {}
 
 
@@ -89,11 +92,25 @@ async def _ollama_stream(messages: list[dict], params: dict) -> AsyncIterator[st
     params = params or {}
     # api_style 读出作语义保留：本链路统一走 OpenAI 兼容端点（原契约行为）。
     _api_style = str(cfg.get("api_style") or "openai")
-    base_url = str(cfg.get("base_url") or settings.OLLAMA_BASE).rstrip("/")
+    card_url = str(cfg.get("base_url") or "").rstrip("/")
+    base_url = card_url or str(settings.OLLAMA_BASE or "").rstrip("/")
     url = base_url + "/v1/chat/completions"
     # 主模型；__model_override 只由 stream() 的降级路径塞进来
-    model = str(params.get("__model_override") or cfg.get("model")
+    card_model = str(cfg.get("model") or "").strip()
+    model = str(params.get("__model_override") or card_model
                 or cfg.get("fallback_model") or settings.LLM_MODEL)
+
+    # 兜底留痕：地址/型号任一来自 yaml 默认值，都打 warning，避免悄悄换模型没人知道。
+    fallback_reasons: list[str] = []
+    if not cfg:
+        fallback_reasons.append("模型卡为空或读取异常")
+    if not card_url:
+        fallback_reasons.append(f"base_url 未配置，回退 {settings.OLLAMA_BASE}")
+    if not card_model and not params.get("__model_override"):
+        fallback_reasons.append(f"model 未配置，回退 {settings.LLM_MODEL}")
+    if fallback_reasons:
+        log.warning("LLM 走 yaml 兜底：%s；实际生效 url=%s model=%s",
+                    "；".join(fallback_reasons), base_url, model)
     try:
         timeout_s = float(cfg.get("timeout_s") or 60.0)
     except (TypeError, ValueError):
