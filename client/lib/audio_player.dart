@@ -51,7 +51,7 @@ class CompanionAudioPlayer {
       final File? stale = _lastFile;
       _lastFile = file;
       if (stale != null && stale.path != file.path) {
-        unawaited(stale.delete().catchError((Object _) {}));
+        unawaited(stale.delete().then<void>((_) {}).catchError((Object _) {}));
       }
     } catch (_) {
       // 静默降级，不让 UI 崩。
@@ -72,7 +72,7 @@ class CompanionAudioPlayer {
       final File? last = _lastFile;
       await _player.dispose();
       if (last != null) {
-        unawaited(last.delete().catchError((Object _) {}));
+        unawaited(last.delete().then<void>((_) {}).catchError((Object _) {}));
       }
     } catch (_) {
       // 忽略。

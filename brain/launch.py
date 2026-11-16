@@ -232,7 +232,7 @@ def _print_models() -> None:
     try:
         from brain.services import model_status
 
-        print("  模型服务（各自 bat 单独启动，大脑只连不加载）")
+        print("  模型服务（判断/合成在大脑进程内，识别可选，对话模型自己起）")
         for line in model_status.detail_lines():
             print(line)
     except Exception:
@@ -271,7 +271,7 @@ def main() -> None:
         print("=" * 58)
         _print_models()
         print("=" * 58)
-        print("  没启动的按右边提示双击对应 bat；模型没起大脑也能跑，只是降级。")
+        print("  大脑起来了就能用；模型没起会自动降级，状态以上面为准。")
         print()
         return
 

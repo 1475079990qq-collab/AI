@@ -49,6 +49,31 @@ def _safe_db(fn, *args, **kwargs):
         return None
 
 
+def _llm_base() -> str:
+    """报错时给用户看真实地址，而不是一句英文 All connection attempts failed。"""
+    try:
+        from brain import config_store
+
+        cfg = (config_store.get_provider("llm") or {}).get("config") or {}
+        if isinstance(cfg, dict) and cfg.get("base_url"):
+            return str(cfg["base_url"])
+    except Exception:
+        pass
+    return str(settings.OLLAMA_BASE)
+
+
+def _error_message(exc: BaseException, stage: str) -> str:
+    text = str(exc)
+    low = text.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in low or "timedout" in low:
+        return f"大模型没在时限内回话（{_llm_base()}），再发一次试试，或者把超时调大一点。"
+    if stage in ("llm", "prompt") and any(
+            k in low for k in ("connect", "refused", "unreachable", "all connection attempts")):
+        return (f"大模型连不上（{_llm_base()}）。先把模型服务起起来（你 F 盘那个），"
+                f"起来后直接重发就行。")
+    return text
+
+
 def _error_code(exc: BaseException, stage: str) -> str:
     name = type(exc).__name__.lower()
     if isinstance(exc, TimeoutError) or "timeout" in name or "timedout" in name:
@@ -558,7 +583,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         if not finished:
             yield TurnEvent("error", {
                 "code": _error_code(exc, stage),
-                "message": str(exc),
+                "message": _error_message(exc, stage),
                 "retryable": True,
                 "request_id": request_id,
             })

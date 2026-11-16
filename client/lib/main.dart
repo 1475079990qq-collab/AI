@@ -1149,11 +1149,11 @@ class _LiveDotState extends State<_LiveDot>
 
 /// 几条上下跳动的声波柱。
 class _Waveform extends StatefulWidget {
-  const _Waveform({required this.color, required this.height, this.bars = 4});
+  const _Waveform({required this.color, required this.height});
 
   final Color color;
   final double height;
-  final int bars;
+  final int bars = 4;
 
   @override
   State<_Waveform> createState() => _WaveformState();

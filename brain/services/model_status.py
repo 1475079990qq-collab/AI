@@ -137,19 +137,31 @@ def probe_asr(force: bool = False) -> dict[str, Any]:
 
 
 def probe_llm() -> dict[str, Any]:
-    """大模型服务形态不定（Ollama / vLLM / llama.cpp），按概率依次试两个端点。"""
-    base = str(settings.OLLAMA_BASE or "").rstrip("/")
+    """大模型服务形态不定（Ollama / vLLM / llama.cpp），按概率依次试两个端点。
+
+    地址只认一处：providers.llm 的 base_url（现在指向 :8082），
+    不再用 config.yaml 里那个 :11434 —— 两处写不同地址就是双轨，
+    会出现「状态页说没起、实际在跑」这种假报警。
+    """
+    base = ""
+    try:
+        base = str(_provider_cfg(_provider("llm")).get("base_url") or "").rstrip("/")
+    except Exception:
+        base = ""
+    base = base or str(settings.OLLAMA_BASE or "").rstrip("/")
     if not base:
-        return {"up": False, "status": 0, "detail": "未配置 OLLAMA_BASE", "payload": {}}
+        return {"up": False, "status": 0, "detail": "未配置大模型地址", "payload": {}}
     hit = _cache.get("llm")
     if hit and _fresh(hit):
         return hit[1]
     for path in ("/v1/models", "/api/tags"):
         result = _probe(base + path, timeout=1.2)
         if result["up"]:
+            result.setdefault("payload", {})["base"] = base
             _cache["llm"] = (_now(), result)
             return result
     result = _probe(base + "/v1/models", timeout=1.2)
+    result.setdefault("payload", {})["base"] = base
     _cache["llm"] = (_now(), result)
     return result
 
@@ -168,43 +180,67 @@ def _mark(up: bool) -> str:
 
 
 def summary_line() -> str:
-    """给启动横幅用的一行摘要。"""
-    j = probe_judge()
+    """给启动横幅用的一行摘要（按现在的进程布局：判断/合成不再占端口）。"""
     a = probe_asr()
     t = probe_tts()
     l = probe_llm()
-    return (f"判断 {_mark(j['up'])}({settings.JUDGE_PORT}) | "
-            f"识别 {_mark(a['up'])}({settings.ASR_PORT}) | "
-            f"合成 {_mark(t['up'])}({settings.TTS_PORT}) | "
-            f"对话 {_mark(l['up'])}({settings.OLLAMA_BASE})")
+    return (f"判断 进程内 | 识别 {_mark(a['up'])}({settings.ASR_PORT}) | "
+            f"合成 {_mark(t['up'])}（进程内） | 对话 {_mark(l['up'])}{str(settings.OLLAMA_BASE)}")
+
+
+def _provider(code: str) -> dict[str, Any]:
+    try:
+        from brain import config_store
+
+        return config_store.get_provider(code) or {}
+    except Exception:
+        return {}
+
+
+def _provider_cfg(prov: dict[str, Any]) -> dict[str, Any]:
+    """provider 配置在库里叫 config（老代码里也出现过 config_json），两种都认。"""
+    raw = (prov or {}).get("config")
+    if raw is None:
+        raw = (prov or {}).get("config_json")
+    cfg = raw or {}
+    if isinstance(cfg, str):
+        try:
+            import json
+
+            cfg = json.loads(cfg)
+        except Exception:
+            cfg = {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _provider_mode(prov: dict[str, Any]) -> str:
+    return str(_provider_cfg(prov).get("mode") or (prov or {}).get("mode") or "").strip().lower()
 
 
 def detail_lines() -> list[str]:
-    """启动时逐条打印，未启动的带上「该怎么起」。"""
-    j = probe_judge()
+    """启动时逐条打印，未启动的带上「该怎么起」。
+
+    这里必须跟真实布局一致：判断已并进进程（onnx），合成是进程内引擎，
+    识别可选，对话大模型地址来自 providers.llm 而不是写死的 :11434。
+    指向已归档的旧 bat 会让人以为「服务没起是我没双击」，所以不再这么写。
+    """
     a = probe_asr()
     t = probe_tts()
     l = probe_llm()
-    rows = [
-        ("情感判断", j, f"http://127.0.0.1:{settings.JUDGE_PORT}", "4-启动情感判断.bat"),
-        ("语音识别", a, f"http://127.0.0.1:{settings.ASR_PORT}", "7-启动语音识别.bat"),
-        ("语音合成", t, f"http://127.0.0.1:{settings.TTS_PORT}", "5-启动语音合成.bat"),
-        ("对话大模型", l, str(settings.OLLAMA_BASE), "0-启动大模型.bat"),
+    judge_mode = _provider_mode(_provider("judge")) or "onnx"
+    llm_cfg = _provider_cfg(_provider("llm"))
+    llm_url = str(llm_cfg.get("base_url") or settings.OLLAMA_BASE)
+    llm_model = str(llm_cfg.get("model") or "")
+
+    lines = [
+        f"  {'情感判断':<5} 进程内（{judge_mode}）  不占端口，不用单独启动",
+        f"  {'语音识别':<5} {_mark(a['up'])}  http://127.0.0.1:{settings.ASR_PORT}"
+        + ("  （需要在控制台 providers 里把 asr 打开）" if not a["up"] else ""),
+        f"  {'语音合成':<5} {'就绪' if t['up'] else '未加载'}  进程内引擎"
+        + ("" if t["up"] else "  首次合成时自动加载，不用起服务"),
+        f"  {'对话大模型':<5} {_mark(l['up'])}  {llm_url}" + (f"  {llm_model}" if llm_model else ""),
     ]
-    lines = []
-    for name, info, url, how in rows:
-        if info["up"]:
-            payload = info.get("payload") or {}
-            note = "（模型未就绪）" if payload.get("ready") is False else ""
-            lines.append(f"  {name:<5} 已启动  {url}  {info['latency_ms']:.0f}ms{note}")
-            if note:
-                why = str(payload.get("detail") or "").strip()
-                # 只取第一句，把「怎么修」的长提示留给服务自己的窗口
-                why = why.split("。")[0]
-                if ":" in why[:24]:
-                    why = why.split(":", 1)[1].strip()
-                if why:
-                    lines.append(f"        └ {why[:80]}")
-        else:
-            lines.append(f"  {name:<5} 未启动  {url}  → 需要时双击 {how}")
+    if not l["up"]:
+        lines.append("        └ 你 F 盘上的模型自己起起来（llama.cpp/ollama 都行），起来后大脑自动连上")
+    return lines
     return lines
