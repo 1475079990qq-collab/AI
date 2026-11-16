@@ -638,7 +638,7 @@ def list_sessions_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
 @router.get("/facts")
 def list_facts_route(
     user_id: str | None = None,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=100, ge=1, le=20000),
 ) -> Any:
     try:
         return config_store.list_facts(user_id=user_id, limit=limit)
