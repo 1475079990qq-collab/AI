@@ -111,8 +111,8 @@ PROVIDER_FIELDS: dict[str, list[dict[str, Any]]] = {
         F("api_style", "接口形态", "select", "custom",
           "「自定义地址」= 独立语音服务 / GPT-SoVITS 适配层（独立启动脚本已归档到 `_旧启动脚本/`，填服务地址就行）；"
           "「云端接口」= OpenAI 风格的 /audio/speech 接口", ["openai", "custom"]),
-        F("base_url", "服务地址", "text", "http://127.0.0.1:8102",
-          "默认走进程内语音引擎；如需接独立 GPT-SoVITS 适配层可填服务地址，独立启动脚本已归档到 `_旧启动脚本/`"),
+        F("base_url", "服务地址", "text", "",
+          "默认走进程内语音引擎（不占独立端口）；只有接外部独立语音服务时才填地址，独立启动脚本已归档到 `_旧启动脚本/`"),
         F("endpoint", "接口路径", "text", "/tts", "填完整 URL 则忽略服务地址"),
         F("api_key", "密钥", "text", "", "", secret=True),
         F("model", "模型 / 版本", "text", "IndexTTS-2", ""),

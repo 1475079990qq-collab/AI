@@ -8,11 +8,12 @@
 端口 / 地址全部来自 config.yaml，bat 不再写死。
 
 哪些模型服务会被一键拉起：
-    ASR（:8103）  TTS（:8102）
-    —— 这两个都是本项目 .venv 里装得上的纯 Python/CPU 服务。
+    ASR（:8103）
+    —— 语音识别是纯 Python/CPU 服务，由本项目 .venv 拉起。
 不需要独立进程了：
     控制台 → 已并入大脑，同一个 8000
     情绪判断 → 走进程内 onnx（provider judge mode=onnx）
+    语音合成 → 走进程内引擎（provider tts mode=inproc，不占独立端口）
 不包括：
     对话大模型（F 盘，你自己启动）
     GPT-SoVITS（:9880）：独立整合包自带 torch

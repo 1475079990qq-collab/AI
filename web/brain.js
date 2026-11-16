@@ -15,7 +15,7 @@
   var REGIONS = [
     { key: 'input', name: '听见', color: COOL, hint: '收到一句输入', weight: 0.09, cx: 0.50, cy: 0.88 },
     { key: 'judge', name: '情感判断', color: WARM, hint: 'onnx 判定情绪', weight: 0.12, cx: 0.25, cy: 0.68 },
-    { key: 'memory', name: '记忆检索', color: '#b49ae0', hint: 'SQLite 取事实', weight: 0.12, cx: 0.74, cy: 0.64 },
+    { key: 'memory', name: '记忆检索', color: '#b49ae0', hint: '事实越多这块越大（上限 300）', weight: 0.12, cx: 0.74, cy: 0.64 },
     { key: 'prompt', name: '提示词', color: '#9aa8b0', hint: '组装上下文', weight: 0.10, cx: 0.79, cy: 0.42 },
     { key: 'tool', name: '工具', color: '#d9c37a', hint: '查 / 记 / 提醒', weight: 0.08, cx: 0.63, cy: 0.76 },
     { key: 'llm', name: '思考', color: ACCENT, hint: '大模型在生成', weight: 0.22, cx: 0.40, cy: 0.42 },
@@ -34,6 +34,7 @@
   var memAnchors = {};       // fact id → 记忆区里的「那一颗」神经元
   var assocPairs = [];       // 共享两字词的 facts = 真实联想（召回本身也是按 bigram 打的）
   var factTotal = 0;
+  var FACT_CAP = 300;          // 记忆区的容量刻度：事实越多这块越大，到 300 条封顶
   var lastTurnMs = null;
   var evCount = 0;
   var firedTotal = 0;
@@ -186,11 +187,25 @@
     return h >>> 0;
   }
 
+  // 记忆区随真实事实生长：对数增长 + 300 条封顶，不是线性膨胀，也不是永远 12%
+  function growMemoryRegion() {
+    var base = 0.12;
+    var t = Math.min(1, Math.log(1 + factTotal) / Math.log(1 + FACT_CAP));
+    var w = base * (1 + 0.8 * t);
+    if (Math.abs(REGIONS[2].weight - w) > 0.012) {
+      REGIONS[2].weight = w;
+      build();                 // 同一固定种子，只重算分区与突触，画面不会漂
+      if (W >= 320) position(); // 重算后必须重新落到画布坐标，否则点全在 NaN
+      renderLegend();
+    }
+  }
+
   // 把真实 facts 挂到记忆区的神经元上；共享两字词的两条事实之间连一根「联想」
   function assignFacts(facts) {
     memAnchors = {};
     assocPairs = [];
     factTotal = facts.length;
+    growMemoryRegion();
     var memIds = [];
     neurons.forEach(function (n, i) { if (n.region === 2) memIds.push(i); });
     if (!memIds.length) return;
@@ -217,7 +232,7 @@
     });
     assocPairs = assocPairs.slice(0, 4000);
     var load = document.getElementById('fact-load');
-    if (load) load.textContent = factTotal + ' 条事实已接入';
+    if (load) load.textContent = factTotal + ' / ' + FACT_CAP + ' 条事实已接入';
   }
 
   function loadFacts() {

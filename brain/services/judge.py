@@ -373,6 +373,25 @@ def _apply_label_map(result: EmotionResult, label_map: dict | None) -> EmotionRe
     ).normalized()
 
 
+# 同一句话的判定缓存：ONNX 单次约 3 秒，重复问句不该重复等（5 分钟有效、上限 256 条）
+_CACHE: dict[str, tuple[float, "EmotionResult"]] = {}
+_CACHE_TTL_S = 300.0
+_CACHE_MAX = 256
+
+
+def _cache_key(text: str, history: list[dict], cfg: dict) -> str:
+    """键 = 原话 + 引擎/模型 + 最近两轮上下文；任一项变了就不复用旧判断。"""
+    tail = ""
+    try:
+        tail = "|".join(
+            f"{str(h.get('role') or '')}:{str(h.get('content') or '')[:60]}"
+            for h in list(history or [])[-2:]
+        )
+    except Exception:
+        tail = ""
+    return f"{text.strip()}|{cfg.get('engine')}|{cfg.get('model')}|{tail}"
+
+
 def _ctx_history(history: list[dict], cfg: dict) -> list[dict]:
     """context_turns 只用于日志上下文裁剪，不改动判定结果。"""
     try:
@@ -391,8 +410,21 @@ def judge(text: str, history: list[dict], request_id: str = "") -> EmotionResult
     """
     started = time.perf_counter()
     cfg = _judge_cfg()
+    key = _cache_key(text, history, cfg)
+    hit = _CACHE.get(key)
+    if hit is not None and (time.time() - hit[0]) < _CACHE_TTL_S:
+        # 同一句话几分钟内又问一遍（问候、复述、测试）：直接复用上次判断。
+        # 不是为了省电，是因为 ONNX 单次约 3 秒——重复问句不该让人再等 3 秒。
+        result = hit[1].model_copy(deep=True)
+        _safe_log(result=result, text=text, history=_ctx_history(history, cfg),
+                  latency_ms=(time.perf_counter() - started) * 1000.0,
+                  request_id=request_id)
+        return result
     result = _decide(text, history, cfg)
     result = _apply_label_map(result, cfg.get("label_map"))
+    _CACHE[key] = (time.time(), result.model_copy(deep=True))
+    while len(_CACHE) > _CACHE_MAX:
+        _CACHE.pop(next(iter(_CACHE)), None)
     _safe_log(result=result, text=text, history=_ctx_history(history, cfg),
               latency_ms=(time.perf_counter() - started) * 1000.0,
               request_id=request_id)
