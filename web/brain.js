@@ -10,12 +10,17 @@
   var WARM = '#e8a67a';
   var COOL = '#7aa8e8';
   var RED = '#e07a72';
-  var NEURON_COUNT = 680;
+  var NEURON_COUNT = 680;      // BrainGrowth 缺失/异常时的回退基数
+  var BG = (typeof window !== 'undefined' && window.BrainGrowth) ? window.BrainGrowth : null;
+  var lessonTotal = 0;
+  var factCap = 600;           // 与 BrainGrowth.DEFAULTS.factCap 对齐
+  var lessonCap = 60;          // 与 BrainGrowth.DEFAULTS.lessonCap 对齐
+  var lessonAnchors = {};
 
   var REGIONS = [
     { key: 'input', name: '听见', color: COOL, hint: '收到一句输入', weight: 0.09, cx: 0.50, cy: 0.88 },
     { key: 'judge', name: '情感判断', color: WARM, hint: 'onnx 判定情绪', weight: 0.12, cx: 0.25, cy: 0.68 },
-    { key: 'memory', name: '记忆检索', color: '#b49ae0', hint: '事实越多这块越大（上限 300）', weight: 0.12, cx: 0.74, cy: 0.64 },
+    { key: 'memory', name: '记忆检索', color: '#b49ae0', hint: '一条事实一颗记忆神经元（上限 600）', weight: 0.12, cx: 0.74, cy: 0.64 },
     { key: 'prompt', name: '提示词', color: '#9aa8b0', hint: '组装上下文', weight: 0.10, cx: 0.79, cy: 0.42 },
     { key: 'tool', name: '工具', color: '#d9c37a', hint: '查 / 记 / 提醒', weight: 0.08, cx: 0.63, cy: 0.76 },
     { key: 'llm', name: '思考', color: ACCENT, hint: '大模型在生成', weight: 0.22, cx: 0.40, cy: 0.42 },
@@ -34,11 +39,11 @@
   var memAnchors = {};       // fact id → 记忆区里的「那一颗」神经元
   var assocPairs = [];       // 共享两字词的 facts = 真实联想（召回本身也是按 bigram 打的）
   var factTotal = 0;
-  var FACT_CAP = 300;          // 记忆区的容量刻度：事实越多这块越大，到 300 条封顶
   var lastTurnMs = null;
   var evCount = 0;
   var firedTotal = 0;
   var lastEventAt = 0;
+  var socketErr = false;
   var t0 = performance.now();
   var feed = [];
   // 「定格」：方便看清刚刚亮过哪些神经元；定格时不再衰减，也不假装还在放电
@@ -66,7 +71,46 @@
     return true;
   }
 
+  // 把模块算出的整图接进当前画面：先算完再换引用，旧图在新图就绪前继续画
+  function applyGrowth(res) {
+    neurons = res.neurons.map(function (n) {
+      return {
+        nx: n.nx, ny: n.ny, region: n.region, heat: 0,
+        size: n.size, delay: n.delay, fid: n.fid, kind: n.kind
+      };
+    });
+    edges = res.edges || [];
+    assocPairs = res.assocPairs || [];
+    memAnchors = res.memAnchors || {};
+    lessonAnchors = res.lessonAnchors || {};
+    factTotal = res.factTotal || 0;
+    lessonTotal = res.lessonTotal || 0;
+    factCap = res.factCap || factCap;
+    lessonCap = res.lessonCap || lessonCap;
+    adj = neurons.map(function () { return []; });
+    edges.forEach(function (e) {
+      if (adj[e[0]].length < 8) adj[e[0]].push(e[1]);
+      if (adj[e[1]].length < 8) adj[e[1]].push(e[0]);
+    });
+    REGIONS[2].hint = '一条事实一颗记忆神经元（上限 ' + factCap + '）';
+    if (W >= 320) position();
+  }
+
   function build() {
+    if (BG) {
+      try {
+        applyGrowth(BG.build([], []));
+        return;
+      } catch (e) {
+        console.warn('[brain] BrainGrowth 构建失败，退回固定 ' + NEURON_COUNT + '：', e && e.message || e);
+        BG = null;
+      }
+    }
+    buildLegacy();
+  }
+
+  // 回退路径：BrainGrowth 缺失/异常时的旧固定 680 逻辑，保证页面不白屏
+  function buildLegacy() {
     var rand = rng(20261116);
     neurons = [];
     edges = [];
@@ -136,8 +180,9 @@
   function resize() {
     var rect = canvas.getBoundingClientRect();
     DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = Math.max(320, rect.width);
-    H = Math.max(320, rect.height);
+    // 画布尺寸跟着面板走：面板多高，画布就多高，不再固定上限把下半截留黑
+    W = rect.width > 0 ? rect.width : 320;
+    H = rect.height > 0 ? rect.height : 320;
     canvas.width = Math.round(W * DPR);
     canvas.height = Math.round(H * DPR);
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -145,10 +190,11 @@
   }
 
   function position() {
+    var padX = 20, padY = 18;
     neurons.forEach(function (n) {
-      // 留边：脑形不要贴边，右边留给文字
-      n.x = 24 + n.nx * (W - 140);
-      n.y = 30 + n.ny * (H - 90);
+      // 留边：四周均匀留白，脑形铺满整个画布，不再缩在上半区
+      n.x = padX + n.nx * (W - padX * 2);
+      n.y = padY + n.ny * (H - padY * 2);
     });
   }
 
@@ -187,28 +233,54 @@
     return h >>> 0;
   }
 
-  // 记忆区随真实事实生长：对数增长 + 300 条封顶，不是线性膨胀，也不是永远 12%
+  // 生长已由 BrainGrowth 按条长神经元，不再对数调权重；保留空壳避免调用点报错
   function growMemoryRegion() {
-    var base = 0.12;
-    var t = Math.min(1, Math.log(1 + factTotal) / Math.log(1 + FACT_CAP));
-    var w = base * (1 + 0.8 * t);
-    if (Math.abs(REGIONS[2].weight - w) > 0.012) {
-      REGIONS[2].weight = w;
-      build();                 // 同一固定种子，只重算分区与突触，画面不会漂
-      if (W >= 320) position(); // 重算后必须重新落到画布坐标，否则点全在 NaN
+  }
+
+  // 图例计数行：事实 X / 上限 · 教训 Y / 上限（数字来自模块，不写死）
+  function updateFactLoad() {
+    var load = document.getElementById('fact-load');
+    if (load) load.textContent = '事实 ' + factTotal + ' / ' + factCap + ' · 教训 ' + lessonTotal + ' / ' + lessonCap;
+  }
+
+  // 把真实 facts / lessons 交给模块重建脑图；共享两字词的联想边由模块产出
+  function assignFacts(facts, lessons) {
+    facts = facts || [];
+    lessons = lessons || [];
+    if (!BG) { assignFactsLegacy(facts); return; }
+
+    var HEAVY = 300;   // 超过这个量级，先出基数图分帧再补事实点，避免打开页面主线程长卡
+    function rebuild() {
+      try {
+        var res = BG.build(facts, lessons);
+        applyGrowth(res);
+        renderLegend();
+      } catch (e) {
+        console.warn('[brain] BrainGrowth 重建失败，保留当前脑图：', e && e.message || e);
+      }
+      updateFactLoad();
+    }
+
+    if (facts.length > HEAVY) {
+      // 第一帧先画基数 + 教训图，事实点下一帧补上；旧图不会被清空
+      try { applyGrowth(BG.build([], lessons)); } catch (e) { /* 保留现状 */ }
+      if (W >= 320) position();
       renderLegend();
+      updateFactLoad();
+      setTimeout(rebuild, 30);
+    } else {
+      rebuild();
     }
   }
 
-  // 把真实 facts 挂到记忆区的神经元上；共享两字词的两条事实之间连一根「联想」
-  function assignFacts(facts) {
+  // 回退路径：模块缺失时沿用旧的 hash 挂靠（多条事实挤一颗，不真实增长）
+  function assignFactsLegacy(facts) {
     memAnchors = {};
     assocPairs = [];
     factTotal = facts.length;
-    growMemoryRegion();
     var memIds = [];
     neurons.forEach(function (n, i) { if (n.region === 2) memIds.push(i); });
-    if (!memIds.length) return;
+    if (!memIds.length) { updateFactLoad(); return; }
     var grams = {};
     facts.forEach(function (f) {
       var id = String(f.id || '');
@@ -231,19 +303,21 @@
       }
     });
     assocPairs = assocPairs.slice(0, 4000);
-    var load = document.getElementById('fact-load');
-    if (load) load.textContent = factTotal + ' / ' + FACT_CAP + ' 条事实已接入';
+    updateFactLoad();
   }
 
   function loadFacts() {
     var token = '';
     try { token = localStorage.getItem('companion.admin_token') || ''; } catch (e) { /* noop */ }
-    fetch('/api/admin/facts?limit=200', { headers: token ? { 'X-Admin-Token': token } : {} })
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        assignFacts(Array.isArray(d) ? d : (d.items || []));
-      })
-      .catch(function () { /* 读不到事实就只按条数放电，不影响直播 */ });
+    var headers = token ? { 'X-Admin-Token': token } : {};
+    Promise.all([
+      fetch('/api/admin/facts?limit=1000', { headers: headers }).then(function (r) { return r.json(); }),
+      fetch('/api/admin/lessons?limit=500', { headers: headers }).then(function (r) { return r.json(); }).catch(function () { return { items: [] }; })
+    ]).then(function (pair) {
+      var facts = Array.isArray(pair[0]) ? pair[0] : ((pair[0] && pair[0].items) || []);
+      var lessons = (pair[1] && pair[1].items) || [];
+      assignFacts(facts, lessons);
+    }).catch(function () { /* 读不到事实就只按条数放电，不影响直播 */ });
   }
 
   function regionOf(kind) {
@@ -370,7 +444,7 @@
 
     // 脑廓：一颗脑的外缘 + 一条纵裂（不叠两个圈，避免看起来像两个靶子）
     ctx.save();
-    var cx2 = W * 0.53, cy2 = H * 0.45, rx = W * 0.315, ry = H * 0.285;
+    var cx2 = W * 0.50, cy2 = H * 0.52, rx = W * 0.40, ry = H * 0.40;
     ctx.beginPath();
     ctx.ellipse(cx2, cy2, rx, ry, 0, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(86,150,140,.055)';
@@ -386,7 +460,7 @@
     ctx.restore();
 
     // 突触：冷线一次批量画，热线单独画，成本可控
-    ctx.strokeStyle = 'rgba(150,178,172,.16)';
+    ctx.strokeStyle = 'rgba(150,178,172,.20)';
     ctx.lineWidth = 0.75;
     ctx.beginPath();
     for (var e = 0; e < edges.length; e++) {
@@ -411,9 +485,11 @@
     }
     ctx.globalAlpha = 1;
 
-    // 联想：共享两字词的事实之间那根线（只在有相关事实时才画，冷态很淡）
+    // 联想：共享两字词的事实之间那根线（静息压很淡，记忆区有余温时才提亮）
     if (assocPairs.length) {
-      ctx.strokeStyle = 'rgba(170,145,215,.075)';
+      var memHeat = regionHeat(REGIONS[2]);
+      var assocAlpha = 0.032 + memHeat * 0.085;
+      ctx.strokeStyle = 'rgba(170,145,215,' + assocAlpha + ')';
       ctx.lineWidth = 0.75;
       ctx.beginPath();
       for (var q = 0; q < assocPairs.length; q++) {
@@ -478,9 +554,9 @@
         }
       } else {
         // 静息神经元：整片脑要看得清（不然停止对话时几乎全黑），但不喧宾夺主
-        ctx.fillStyle = 'rgba(186,210,205,' + ((active ? 0.13 : 0.34) + breath * 0.06) + ')';
+        ctx.fillStyle = 'rgba(186,210,205,' + ((active ? 0.15 : 0.38) + breath * 0.05) + ')';
         ctx.beginPath();
-        ctx.arc(n.x, n.y, n.size, 0, Math.PI * 2);
+        ctx.arc(n.x, n.y, n.size + 0.35, 0, Math.PI * 2);
         ctx.fill();
       }
     }
@@ -489,18 +565,44 @@
     var peakEl = document.getElementById('peak');
     if (peakEl) peakEl.textContent = peak.toFixed(2);
     REGIONS.forEach(function (r) {
-      var x = 24 + r.cx * (W - 140);
-      var y = 30 + r.cy * (H - 90);
+      var x = 20 + r.cx * (W - 40);
+      var y = 18 + r.cy * (H - 36);
       var heat = regionHeat(r);
+      var v = r.value ? (r.value.length > 20 ? r.value.slice(0, 19) + '…' : r.value) : '';
+
       ctx.textAlign = 'center';
+      ctx.font = '600 12px -apple-system, "Microsoft YaHei", sans-serif';
+      var nameW = ctx.measureText(r.name).width;
+      var valW = 0;
+      if (v) {
+        ctx.font = '500 10.5px -apple-system, "Microsoft YaHei", sans-serif';
+        valW = ctx.measureText(v).width;
+      }
+      var plateW = Math.max(nameW, valW) + 16;
+      var plateH = v ? 30 : 20;
+      // 半透明暗底板：即使压在联想线 / 神经网上，字也读得清
+      var px = x - plateW / 2, py = y - 32, rad = 6;
+      ctx.fillStyle = 'rgba(8,12,14,.62)';
+      ctx.beginPath();
+      ctx.moveTo(px + rad, py);
+      ctx.lineTo(px + plateW - rad, py);
+      ctx.quadraticCurveTo(px + plateW, py, px + plateW, py + rad);
+      ctx.lineTo(px + plateW, py + plateH - rad);
+      ctx.quadraticCurveTo(px + plateW, py + plateH, px + plateW - rad, py + plateH);
+      ctx.lineTo(px + rad, py + plateH);
+      ctx.quadraticCurveTo(px, py + plateH, px, py + plateH - rad);
+      ctx.lineTo(px, py + rad);
+      ctx.quadraticCurveTo(px, py, px + rad, py);
+      ctx.closePath();
+      ctx.fill();
+
       ctx.lineWidth = 3;
       ctx.strokeStyle = 'rgba(8,12,14,.8)';
       ctx.font = '600 12px -apple-system, "Microsoft YaHei", sans-serif';
       ctx.strokeText(r.name, x, y - 26);
       ctx.fillStyle = 'rgba(225,235,232,' + (0.5 + heat * 0.45) + ')';
       ctx.fillText(r.name, x, y - 26);
-      if (r.value) {
-        var v = r.value.length > 18 ? r.value.slice(0, 17) + '…' : r.value;
+      if (v) {
         ctx.font = '500 10.5px -apple-system, "Microsoft YaHei", sans-serif';
         ctx.strokeText(v, x, y - 12);
         ctx.fillStyle = 'rgba(165,178,180,' + (0.35 + heat * 0.4) + ')';
@@ -522,20 +624,43 @@
     });
   }
 
-  function pushFeed(ev) {
-    var t = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-    var r = REGIONS[Math.max(0, regionOf(ev.kind))] || { name: '事件' };
-    feed.unshift({ t: t, txt: r.name + ' · ' + describe(ev) });
-    if (feed.length > 6) feed.pop();
+  function relFeedTime(at) {
+    var s = Math.max(0, Math.round(Date.now() / 1000 - at));
+    if (s < 60) return s + ' 秒前';
+    if (s < 3600) {
+      var m = Math.floor(s / 60), sec = s % 60;
+      return m + ' 分 ' + sec + ' 秒前';
+    }
+    var d = new Date(at * 1000);
+    return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  function renderFeed() {
     var box = document.getElementById('feed-lines');
+    if (!box) return;
     box.innerHTML = '';
     feed.forEach(function (f) {
       var d = document.createElement('div');
       d.className = 'line';
-      d.innerHTML = '<span class="k">' + f.t + '</span>' + escapeHtml(f.txt);
+      d.innerHTML =
+        '<span class="k">' + escapeHtml(relFeedTime(f.at)) + '</span>' +
+        '<span class="region">' + escapeHtml(f.region) + '</span>' +
+        escapeHtml(f.txt);
       box.appendChild(d);
     });
   }
+
+  function pushFeed(ev) {
+    var at = (ev.t && isFinite(ev.t)) ? ev.t : Date.now() / 1000;
+    var ri = regionOf(ev.kind);
+    var r = ri >= 0 ? REGIONS[ri] : { name: '事件' };
+    feed.unshift({ at: at, region: r.name, txt: describe(ev) });
+    if (feed.length > 6) feed.pop();
+    renderFeed();
+  }
+
+  // 相对时间每秒往前走一格，同秒到达的事件也能看出先后
+  setInterval(renderFeed, 1000);
 
   function setConn(state, txt) {
     document.getElementById('conn-dot').className = 'dot' + (state === 'on' ? ' on' : (state === 'err' ? ' err' : ''));
@@ -548,11 +673,28 @@
     REGIONS.forEach(function (r) {
       var row = document.createElement('div');
       row.className = 'row' + (regionHeat(r) > 0.08 ? '' : ' idle');
-      row.innerHTML =
-        '<span class="sw" style="background:' + r.color + '"></span>' +
-        '<span class="nm">' + escapeHtml(r.name) +
-        '<br><span style="color:#6e797d;font-size:11px">' + escapeHtml(r.hint) + '</span></span>' +
-        '<span class="val">' + (r.value ? escapeHtml(r.value) : '—') + '</span>';
+      var sw = document.createElement('span');
+      sw.className = 'sw';
+      sw.style.background = r.color;
+      var main = document.createElement('div');
+      main.className = 'main';
+      var line1 = document.createElement('div');
+      line1.className = 'line1';
+      var nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = r.name;
+      var val = document.createElement('span');
+      val.className = 'val';
+      val.textContent = r.value || '—';
+      line1.appendChild(nm);
+      line1.appendChild(val);
+      var hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.textContent = r.hint;
+      main.appendChild(line1);
+      main.appendChild(hint);
+      row.appendChild(sw);
+      row.appendChild(main);
       box.appendChild(row);
     });
     document.getElementById('legend-count').textContent = String(neurons.length);
@@ -567,14 +709,21 @@
   function connect() {
     var token = '';
     try { token = localStorage.getItem('companion.admin_token') || ''; } catch (e) { /* noop */ }
+    socketErr = false;
     var es = new EventSource('/api/admin/live/stream' + (token ? '?token=' + encodeURIComponent(token) : ''));
-    es.onopen = function () { setConn('on', '实时'); };
+    es.onopen = function () { socketErr = false; setConn('on', '实时'); };
     es.onmessage = function (m) {
       try { onEvent(JSON.parse(m.data)); } catch (e) { /* 坏帧不打断整条流 */ }
     };
-    es.onerror = function () {
-      if (Date.now() - lastEventAt > 4000) setConn('err', '断线重连中…');
-    };
+    es.onerror = function () { socketErr = true; };
+    // 不凭一次 onerror 就报断线：以最近一次真实事件为准，超过 10 秒仍无帧才分级提示；
+    // 从启动到现在一帧都没收到过，先按「等待事件」灰显，不直接标红。
+    setInterval(function () {
+      var stale = !lastEventAt || (Date.now() - lastEventAt > 10000);
+      if (!stale) setConn('on', '实时');
+      else if (socketErr && lastEventAt) setConn('err', '正在重连…');
+      else setConn('wait', '等待事件…');
+    }, 1000);
   }
 
   // 定格按钮：不衰减，方便数「刚才亮了多少个神经元」
