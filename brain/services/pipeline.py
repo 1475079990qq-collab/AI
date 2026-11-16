@@ -20,7 +20,7 @@ from typing import AsyncIterator
 from brain import db, tools
 from brain.config import settings
 from brain.schemas import ChatRequest, EmotionResult, TurnEvent, new_request_id
-from brain.services import feedback_rules, judge, llm, memory, prompt
+from brain.services import feedback_rules, judge, llm, memory, prompt, tone
 
 try:
     from brain import config_store
@@ -382,11 +382,20 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         queue: asyncio.Queue = asyncio.Queue()
         _END = object()
 
+        # 语色门：模型爱在正文里写「（语气轻松）」这种舞台说明，
+        # 出口处按规则吞掉（正常括号不动）。旁白不可能比人说话更真。
+        tone_guard = tone.StreamFilter()
+
         async def _produce(gen, q):
             # q 必须显式传：重启时 queue 会换新对象，靠闭包会写进新队列造成误判结束。
             try:
                 async for delta in gen:
-                    await q.put(("token", delta))
+                    clean_delta = tone_guard.feed(delta)
+                    if clean_delta:
+                        await q.put(("token", clean_delta))
+                tail = tone_guard.flush()
+                if tail:
+                    await q.put(("token", tail))
             except Exception as exc:      # LLM 异常转交消费端，统一发 error
                 await q.put(("error", exc))
             finally:
