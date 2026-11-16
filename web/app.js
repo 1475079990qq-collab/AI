@@ -724,8 +724,10 @@
     $tts = $('tts-player');
     $mic = $('mic-btn');
 
-    // 固定且持久化的 user_id / session_id，保证两轮对话共享情绪记忆
-    userId = getOrCreateId(LS_USER, 'u');
+    // user_id 固定成 u1：和 App 共用同一份记忆（手机上说过的事，网页上也记得）。
+    // session_id 仍按浏览器持久化——会话只是「这一次聊天」的上下文，不该跨端串。
+    // 以前这里用随机 id，导致同一个人在网页和 App 上各有一套互不相通的记忆。
+    userId = 'u1';
     sessionId = getOrCreateId(LS_SESSION, 's');
 
     initServerInput();

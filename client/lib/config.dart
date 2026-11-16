@@ -43,8 +43,15 @@ class AppConfig {
     await prefs.setString(_prefKey, normalized);
   }
 
-  static String? _normalize(String raw) {
-    String s = raw.trim();
+  /// 记忆归属：一个人一份记忆。
+  /// App 和 Web 都指向同一个 id，这样手机上说过的事，打开网页它还记得。
+  /// 以前两端各生成一个 id（App 写死 u1、Web 每次随机），等于两套互不相通的记忆。
+  static const String userId = 'u1';
+
+  /// 会话只代表「这一次聊天」的上下文，换端不共享；长期记忆才跨端。
+  String get sessionId => 'app';
+
+  static String? _normalize(String raw) {    String s = raw.trim();
     while (s.endsWith('/')) {
       s = s.substring(0, s.length - 1);
     }

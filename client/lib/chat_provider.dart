@@ -29,6 +29,34 @@ class UpdateCheck {
   final UpdateInfo? info;
 }
 
+/// 一张递到手上的纸：后端从这一轮回答里摘出来的干货。
+class DeliveryCard {
+  const DeliveryCard({
+    required this.kind,
+    required this.title,
+    required this.items,
+    this.note = '',
+  });
+
+  final String kind;
+  final String title;
+  final List<String> items;
+  final String note;
+
+  /// 从 card 帧解析；标题或条目为空就当作没有卡（宁可不出，不出半张）。
+  static DeliveryCard? fromEvent(SseEvent event) {
+    final String title = (event.title ?? '').trim();
+    final List<String> items = event.items;
+    if (title.isEmpty || items.isEmpty) return null;
+    return DeliveryCard(
+      kind: event.kind ?? 'note',
+      title: title,
+      items: items,
+      note: event.note ?? '',
+    );
+  }
+}
+
 /// 一条对话消息。助手消息的 [text] 会在流式过程中被逐字追加。
 class ChatMessage {
   ChatMessage({
@@ -41,6 +69,16 @@ class ChatMessage {
   final String role;
   String text;
   String emotion;
+
+  /// 这一轮递出来的卡；null 表示这轮只有「说」。
+  DeliveryCard? card;
+
+  /// 对上号用的两个 id：卡片记录 id 与这一轮的 request_id。
+  int deliveryId = 0;
+  String requestId = '';
+
+  /// 0 没评 / 1 对了 / -1 不对。
+  int feedback = 0;
 }
 
 /// 会话状态机：ChangeNotifier，界面用 ListenableBuilder 监听。
@@ -55,8 +93,14 @@ class ChatProvider extends ChangeNotifier {
   final CompanionAudioPlayer _audio = CompanionAudioPlayer();
   final CompanionRecorder _recorder = CompanionRecorder();
 
-  static const String _userId = 'u1';
-  static const String _sessionId = 's1';
+  // 身份统一从 AppConfig 取：记忆归属是全局唯一的一处，不在各端各写一份。
+  // （App 以前写死 'u1'、Web 每次随机生成，结果同一个人有两套记忆。）
+  static const String _userId = AppConfig.userId;
+  static const String _sessionId = 'app';
+
+  /// 刚递出一张卡：墨滴据此做一次「分裂出一枚薄片」的动作，1.2 秒后收回。
+  bool cardJustArrived = false;
+  Timer? _cardTimer;
 
   /// 全部消息（含正在生成的半句）。
   final List<ChatMessage> messages = <ChatMessage>[];
@@ -174,6 +218,38 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  /// 墨滴刚递出东西：亮一次、分裂一次，然后收回。
+  void _pulseDelivery() {
+    cardJustArrived = true;
+    _cardTimer?.cancel();
+    _cardTimer = Timer(const Duration(milliseconds: 1200), () {
+      cardJustArrived = false;
+      _safeNotify();
+    });
+  }
+
+  /// 点一下「对了 / 不对」。
+  ///
+  /// 只报结果、不写长文 —— 这是全系统最便宜的信号：一次点击换它下次少错一次。
+  /// 上传失败不谎报成功（本地不留下一个假的「已记下」）。
+  Future<void> rateMessage(ChatMessage msg, bool good) async {
+    final int verdict = good ? 1 : -1;
+    if (msg.feedback == verdict) return;
+    msg.feedback = verdict;
+    _safeNotify();
+    final bool ok = await _client.feedback(
+      requestId: msg.requestId,
+      verdict: verdict,
+      deliveryId: msg.deliveryId,
+      target: msg.text,
+    );
+    if (!ok) {
+      msg.feedback = 0;
+      lastError = '反馈没送出去（大脑没连上？）';
+      _safeNotify();
+    }
+  }
+
   /// 发送一条文本并消费 SSE 流。
   Future<void> send(String text) async {
     final String trimmed = text.trim();
@@ -197,6 +273,8 @@ class ChatProvider extends ChangeNotifier {
     final ChatMessage assistant = ChatMessage(role: 'assistant', text: '');
     messages.add(assistant);
     isStreaming = true;
+    cardJustArrived = false;
+    _cardTimer?.cancel();
     currentEmotion = 'neutral';
     _safeNotify();
 
@@ -246,6 +324,20 @@ class ChatProvider extends ChangeNotifier {
             if (metaEmotion != null && metaEmotion.isNotEmpty) {
               currentEmotion = metaEmotion;
               assistant.emotion = metaEmotion;
+              _safeNotify();
+            }
+            final String? rid = event.requestId;
+            if (rid != null && rid.isNotEmpty) assistant.requestId = rid;
+            break;
+          case 'card':
+            // 后端递出来一张纸：挂在消息上，并让墨滴做一次「分裂递出」的动作。
+            final DeliveryCard? card = DeliveryCard.fromEvent(event);
+            if (card != null) {
+              assistant.card = card;
+              assistant.deliveryId = event.deliveryId ?? 0;
+              final String? rid = event.requestId;
+              if (rid != null && rid.isNotEmpty) assistant.requestId = rid;
+              _pulseDelivery();
               _safeNotify();
             }
             break;
@@ -477,6 +569,7 @@ class ChatProvider extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _cancelled = true;
+    _cardTimer?.cancel();
     unawaited(_audio.dispose());
     unawaited(_recorder.dispose());
     super.dispose();

@@ -115,7 +115,7 @@ def _latency(conn: sqlite3.Connection, limit: int = 20) -> dict:
             continue
         try:
             rows = conn.execute(
-                f"SELECT latency_ms, created_at FROM {table} WHERE latency_ms IS NOT NULL "
+                f"SELECT * FROM {table} WHERE latency_ms IS NOT NULL "
                 "ORDER BY id DESC LIMIT ?", (int(limit),),
             ).fetchall()
         except sqlite3.Error:
@@ -123,13 +123,24 @@ def _latency(conn: sqlite3.Connection, limit: int = 20) -> dict:
         vals = [float(r["latency_ms"] or 0) for r in rows if float(r["latency_ms"] or 0) >= 0]
         if vals:
             vals_sorted = sorted(vals)
-            return {
+            out = {
                 "source": table,
                 "n": len(vals),
                 "avg": round(sum(vals) / len(vals), 0),
                 "p50": round(vals_sorted[len(vals_sorted) // 2], 0),
                 "slowest": round(max(vals), 0),
             }
+            # 降级轮次：走的是关键词规则而不是真模型，这类轮次「答得像」但「不准」
+            if "degraded" in cols:
+                try:
+                    out["degraded"] = int(conn.execute(
+                        f"SELECT COUNT(*) AS n FROM {table} WHERE degraded=1 "
+                        "AND id IN (SELECT id FROM " + table + " ORDER BY id DESC LIMIT ?)",
+                        (int(limit),),
+                    ).fetchone()["n"])
+                except sqlite3.Error:
+                    pass
+            return out
     return {}
 
 
@@ -217,10 +228,12 @@ def collect() -> dict:
                           f"mode={llm.get('mode')} enabled={llm.get('enabled')}"))
         yaml_base = str(y.get("OLLAMA_BASE", ""))
         yaml_model = str(y.get("LLM_MODEL", ""))
-        if yaml_base and cfg.get("base_url") and yaml_base.rstrip("/") != str(cfg.get("base_url")).rstrip("/"):
-            lines.append((WARN, f"双轨：config.yaml 写 {yaml_base}，实际生效 {cfg.get('base_url')}（以数据库为准）"))
-        if yaml_model and cfg.get("model") and yaml_model != str(cfg.get("model")):
-            lines.append((WARN, f"双轨：config.yaml 写 {yaml_model}，实际生效 {cfg.get('model')}（以数据库为准）"))
+        # 只有当数据库里没有这张卡时，config.yaml 的兜底才真的生效；
+        # 否则那两行只是摆设，不该报警（报警会让真问题被噪音淹掉）。
+        if not cfg.get("base_url"):
+            lines.append((WARN, f"数据库缺大模型卡，这次实际用的是 config.yaml 兜底：{yaml_base}"))
+        elif yaml_base and yaml_base.rstrip("/") != str(cfg.get("base_url")).rstrip("/"):
+            lines.append((OK, f"config.yaml 里那行 {yaml_base} 是兜底值，当前未生效（以数据库为准）"))
     alt = _provider(conn, "llm_alt")
     if alt:
         lines.append((OK if str(alt.get("mode")) == "off" else WARN,
@@ -244,6 +257,11 @@ def collect() -> dict:
         tag = OK if lat["p50"] <= 1500 else (WARN if lat["p50"] <= 2500 else BAD)
         lines.append((tag, f"最近 {lat['n']} 轮：中位 {int(lat['p50'])}ms  平均 {int(lat['avg'])}ms  "
                            f"最慢 {int(lat['slowest'])}ms（来源 {lat['source']}）"))
+        if lat.get("degraded"):
+            r = lat["degraded"] / max(1, lat["n"])
+            lines.append((WARN if r < 0.35 else BAD,
+                          f"其中 {lat['degraded']} 轮是降级回答（{r * 100:.0f}%）："
+                          "这类轮次用的是规则/兜底，不是真模型"))
     else:
         lines.append((WARN, "没有耗时记录（还没聊过，或 turn_logs 为空）"))
     report["sections"].append({"title": "速度", "lines": lines})

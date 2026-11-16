@@ -25,6 +25,22 @@ class SseEvent {
   bool get retryable => data['retryable'] == true;
   double? get intensity =>
       data['intensity'] is num ? (data['intensity'] as num).toDouble() : null;
+
+  // ---- card 帧（后端递出来的那张纸）----
+  String? get requestId => _str('request_id');
+  String? get title => _str('title');
+  String? get kind => _str('kind');
+  String? get note => _str('note');
+  int? get deliveryId => data['delivery_id'] is num
+      ? (data['delivery_id'] as num).toInt()
+      : null;
+  List<String> get items {
+    final Object? value = data['items'];
+    if (value is List) {
+      return value.map((Object? e) => '${e ?? ''}'.trim()).toList(growable: false);
+    }
+    return const <String>[];
+  }
 }
 
 /// 用 package:http 的 `Client.send()` 直连大脑服务（不使用 dio）。
@@ -176,6 +192,39 @@ class SseClient {
       return decoded is Map<String, dynamic> ? decoded : null;
     } catch (_) {
       return null;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// POST /feedback：只报「对了 / 不对」，不写长文。
+  ///
+  /// 这一步是全系统最便宜的信号：一次点击，换它下次少错一次。
+  /// 失败不抛给界面（反馈丢一次不算事故），但也不假装成功。
+  Future<bool> feedback({
+    required String requestId,
+    required int verdict,
+    int deliveryId = 0,
+    String target = '',
+  }) async {
+    final http.Client client = http.Client();
+    try {
+      final String body = jsonEncode(<String, dynamic>{
+        'request_id': requestId,
+        'verdict': verdict,
+        if (deliveryId > 0) 'delivery_id': deliveryId,
+        'target': target.length > 120 ? target.substring(0, 120) : target,
+      });
+      final http.Response response = await client
+          .post(
+            Uri.parse('$baseUrl/feedback'),
+            headers: <String, String>{'Content-Type': 'application/json'},
+            body: body,
+          )
+          .timeout(const Duration(seconds: 8));
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
     } finally {
       client.close();
     }

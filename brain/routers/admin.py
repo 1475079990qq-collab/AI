@@ -625,6 +625,29 @@ def delete_fact_route(id: str = Query(...)) -> Any:
         return _degraded(exc, id=id, deleted=False, ok=False)
 
 
+# ---- v2 · 反馈与交付（他点过的勾 / 递出去的卡）----
+@router.get("/feedback")
+def list_feedback_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
+    try:
+        from brain import db as database
+
+        rows = database.recent_feedback(limit=limit)
+        return {"items": rows, "total": len(rows)}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
+@router.get("/deliveries")
+def list_deliveries_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
+    try:
+        from brain import db as database
+
+        rows = database.recent_deliveries(limit=limit)
+        return {"items": rows, "total": len(rows)}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
 # ---- v2 · config audit ----
 @router.get("/config-audit")
 def list_config_audit_route(limit: int = Query(default=100, ge=1, le=1000)) -> Any:

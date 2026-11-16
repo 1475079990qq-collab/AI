@@ -451,9 +451,41 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         if event_id:
             _safe_db(db.close_event, event_id, reply_text=summary, fact_ids=fact_ids)
 
+        # ---- 7.5) 给：把这一轮能用的东西压成一张卡，先递出去再说 done ----
+        # 「说」是表达层的第一个出口，「给」是第二个。只有第一个出口，
+        # 永远只是「聊得不错」；有了第二个，才有「给到手上来」。
+        # 纯规则、不调模型，毫秒级；出任何错都当作没有卡，绝不影响回答。
+        card = None
+        delivery_id = None
+        try:
+            from brain.services import deliver as deliver_svc
+
+            card = deliver_svc.build(req.text, summary, emotion.label, bundle)
+            if card:
+                delivery_id = db.add_delivery(
+                    request_id=request_id,
+                    turn_id=turn_id,
+                    user_id=req.user_id,
+                    kind=str(card.get("kind") or ""),
+                    title=str(card.get("title") or ""),
+                    body=json.dumps(card, ensure_ascii=False),
+                )
+        except Exception:
+            log.exception("生成交付卡失败（这一轮按普通回答走）")
+            card = None
+
         # ---- 8) done（末帧，与 error 互斥）----
         final_status = "ok"
         finished = True
+        if card:
+            yield TurnEvent("card", {
+                "request_id": request_id,
+                "delivery_id": delivery_id or 0,
+                "kind": card.get("kind") or "note",
+                "title": card.get("title") or "",
+                "items": card.get("items") or [],
+                "note": card.get("note") or "",
+            })
         yield TurnEvent("done", {
             "done": True,
             "emotion": emotion.label,

@@ -14,6 +14,7 @@ from typing import AsyncIterator
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
 from brain import db, schemas
 from brain.config import settings
@@ -194,6 +195,44 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 _gate.release()
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=_SSE_HEADERS)
+
+
+class FeedbackBody(BaseModel):
+    """一条反馈：他觉得这轮行不行。
+
+    verdict: 1 = 对了 / -1 = 不对 / 0 = 没表态。
+    带 delivery_id 时同时把这轮递出去的卡一起标记 —— 卡对不对，比话好不好更可验证。
+    """
+
+    request_id: str = ""
+    verdict: int = 0
+    delivery_id: int = 0
+    reason: str = ""
+    target: str = ""
+
+
+@router.post("/feedback")
+def feedback(body: FeedbackBody) -> JSONResponse:
+    """收反馈：只有「对了 / 不对」两档，不让人写长文。
+
+    为什么必须有这一步：没有回执的陪伴，再温柔也不会变准 —— 它永远不知道自己错在哪。
+    """
+    verdict = 1 if body.verdict > 0 else (-1 if body.verdict < 0 else 0)
+    kind = {1: "good", -1: "bad", 0: "neutral"}[verdict]
+    try:
+        db.add_feedback(
+            request_id=body.request_id,
+            kind=kind,
+            reason=body.reason,
+            target=body.target,
+        )
+    except Exception:
+        log.exception("写反馈失败")
+        return JSONResponse(status_code=503, content={"ok": False, "detail": "FEEDBACK_UNAVAILABLE"})
+    if body.delivery_id and verdict != 0:
+        db.set_delivery_verdict(int(body.delivery_id), verdict)
+    log.info("反馈  %s  ｜%s", kind, (body.target or "")[:24])
+    return JSONResponse(content={"ok": True, "kind": kind})
 
 
 @router.post("/tts")

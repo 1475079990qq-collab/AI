@@ -140,6 +140,22 @@ CREATE TABLE IF NOT EXISTS feedback (
     reason     TEXT NOT NULL DEFAULT '',
     target     TEXT NOT NULL DEFAULT ''
 );
+
+-- 递出去的那张卡：给了什么 + 他认不认。
+-- 「懂我」不是感觉，是这两列：给过什么、给完之后他点没点那个勾。
+CREATE TABLE IF NOT EXISTS deliveries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
+    request_id TEXT,
+    turn_id    INTEGER,
+    user_id    TEXT,
+    kind       TEXT,
+    title      TEXT,
+    body       TEXT,                 -- 卡片内容 JSON（items 等）
+    verdict    INTEGER DEFAULT 0     -- 0 没评 / 1 对了 / -1 不对
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_req ON deliveries(request_id);
 """
 
 
@@ -753,6 +769,53 @@ def recent_feedback(limit: int = 50) -> list[dict]:
     try:
         rows = conn.execute(
             "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------- 递出去的卡 ----------
+
+def add_delivery(*, request_id: str, turn_id: int | None, user_id: str,
+                 kind: str, title: str, body: str) -> int | None:
+    """记一条「给了什么」。返回 id，失败返回 None（绝不因为记不上就中断回答）。"""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO deliveries(created_at,request_id,turn_id,user_id,kind,title,body) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (_now(), str(request_id or ""), turn_id, str(user_id or ""),
+             str(kind or ""), str(title or ""), str(body or "")),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0) or None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def set_delivery_verdict(delivery_id: int, verdict: int) -> bool:
+    conn = connect()
+    try:
+        conn.execute(
+            "UPDATE deliveries SET verdict=?, updated_at=? WHERE id=?",
+            (int(verdict), _now(), int(delivery_id)),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def recent_deliveries(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM deliveries ORDER BY id DESC LIMIT ?", (int(limit),),
         ).fetchall()
         return [dict(r) for r in rows]
     finally:

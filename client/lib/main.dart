@@ -397,7 +397,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               ),
             ),
           ),
-          Center(child: _Doll(mood: mood, talking: talking)),
+          Center(
+            child: _Doll(
+              mood: mood,
+              talking: talking,
+              delivering: chat.cardJustArrived,
+            ),
+          ),
           // 情绪小标签
           Positioned(
             left: 16,
@@ -520,16 +526,154 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 child: _ThinkingDots(),
               )
             else
-              Text(
-                msg.text,
-                style: const TextStyle(
-                  fontSize: 15.2,
-                  height: 1.85,
-                  letterSpacing: 0.2,
-                  color: _textPrimary,
-                ),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    msg.text,
+                    style: const TextStyle(
+                      fontSize: 15.2,
+                      height: 1.85,
+                      letterSpacing: 0.2,
+                      color: _textPrimary,
+                    ),
+                  ),
+                  if (msg.card != null) _deliverCard(chat, msg),
+                ],
               ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 递到手上的那张纸：标题定调，条目能照着做，底下一句「这张对吗」。
+  ///
+  /// 为什么要有卡：以前整条链路的出口只有一句话，说完就结束了，
+  /// 听完还得自己从一大段里再摘一遍。卡是第二个出口——把干货压成一张纸递过去。
+  Widget _deliverCard(ChatProvider chat, ChatMessage msg) {
+    final DeliveryCard card = msg.card!;
+    final bool rated = msg.feedback != 0;
+    return Padding(
+      padding: const EdgeInsets.only(top: 12, right: 2),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(15, 13, 15, 9),
+        decoration: BoxDecoration(
+          color: _surface.withValues(alpha: 0.55),
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: _accent.withValues(alpha: 0.14)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Container(
+                  width: 3,
+                  height: 15,
+                  decoration: BoxDecoration(
+                    color: _accent.withValues(alpha: 0.75),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    card.title,
+                    style: TextStyle(
+                      fontFamily: Type.serif,
+                      fontSize: 15.5,
+                      height: 1.5,
+                      letterSpacing: 0.3,
+                      color: _textPrimary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 9),
+            for (int i = 0; i < card.items.length; i++)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 7),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    SizedBox(
+                      width: 15,
+                      child: Text(
+                        '${i + 1}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          height: 1.6,
+                          color: _accent.withValues(alpha: 0.8),
+                        ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        card.items[i],
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          height: 1.65,
+                          color: _textPrimary.withValues(alpha: 0.92),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 2),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    rated
+                        ? (msg.feedback > 0 ? '已记下：这张对' : '已记下：这张不对')
+                        : (card.note.isEmpty ? '这张对吗？' : card.note),
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      height: 1.4,
+                      color: _textMuted.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+                _ratePill(chat, msg, true),
+                const SizedBox(width: 6),
+                _ratePill(chat, msg, false),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _ratePill(ChatProvider chat, ChatMessage msg, bool good) {
+    final bool on = msg.feedback == (good ? 1 : -1);
+    final Color tint = good ? Palette.olive : _danger;
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.selectionClick();
+        unawaited(chat.rateMessage(msg, good));
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+        decoration: BoxDecoration(
+          color: on ? tint.withValues(alpha: 0.16) : Colors.transparent,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: on
+                ? tint.withValues(alpha: 0.42)
+                : Colors.white.withValues(alpha: 0.12),
+          ),
+        ),
+        child: Text(
+          good ? '对了' : '不对',
+          style: TextStyle(
+            fontSize: 10.5,
+            letterSpacing: 0.4,
+            color: on ? tint : _textMuted,
+          ),
         ),
       ),
     );
