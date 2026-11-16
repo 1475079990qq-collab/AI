@@ -1,7 +1,7 @@
 name: companion_client
 description: "companion 安卓客户端：键盘文本对话 + SSE 流式解析 + TTS 播放"
 publish_to: 'none'
-version: 1.3.1+6
+version: 1.3.2+7
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
