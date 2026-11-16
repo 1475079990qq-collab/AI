@@ -2114,12 +2114,19 @@
     }
     if (svcEl) {
       var llm = provMap.llm || {};
-      var llmOk = String(health.llm || '') === 'http';
+      var llmSvc = health.llm_service || null;
+      // 优先读后端探活 llm_service.up；老版本/降级没给该字段时回落到旧的 llm==='http'，避免字段缺失一律判红
+      var llmOk = llmSvc ? (llmSvc.up === true) : (String(health.llm || '') === 'http');
+      var llmModel = (llmSvc && llmSvc.model) || (llm.config || {}).model || '';
+      var llmNote = llmModel;
+      if (llmSvc && llmSvc.fallback === true) {
+        llmNote = (llmModel ? llmModel + ' · ' : '') + '已回退到 yaml 兜底地址';
+      }
       var ttsRaw = String(health.tts || '');
       var ttsLabel = ttsRaw === 'inproc' ? '进程内引擎' : (ttsRaw || '未加载');
       svcEl.innerHTML =
         svc('大脑', String(health.status || '').toLowerCase() === 'ok', '进程内') +
-        svc('对话大模型', llmOk, (llm.config || {}).model || '') +
+        svc('对话大模型', llmOk, llmNote) +
         svc('情感判断', String(health.judge || '') === 'onnx', '进程内 onnx') +
         svc('语音合成', !!ttsRaw, ttsLabel);
     }
