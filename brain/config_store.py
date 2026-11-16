@@ -208,12 +208,13 @@ RUNTIME_RULES: dict[str, dict[str, Any]] = {
     "auto_remember":         {"min": 0, "max": 1, "type": "int", "desc": "1=自动沉淀到知识库"},
     "sse_ping_interval":     {"min": 5, "max": 120, "type": "int", "desc": "流式推送的心跳间隔(秒)"},
     "max_concurrency":       {"min": 1, "max": 4, "type": "int", "desc": "同时进行的对话数"},
+    "think_draft":           {"min": 0, "max": 1, "type": "int", "desc": "1=先在心里过一句再说（每轮多 3~4 秒）"},
 }
 
 DEFAULT_SWITCHES: dict[str, str] = {
     "maintenance_mode": "0", "log_prompt": "1", "log_input_text": "1",
     "knowledge_inject": "1", "auto_remember": "1", "sse_ping_interval": "15",
-    "max_concurrency": "1",
+    "max_concurrency": "1", "think_draft": "0",
 }
 
 # 8 类情绪 → 语音默认映射（向量顺序：happy/angry/sad/afraid/disgusted/melancholic/surprised/calm）

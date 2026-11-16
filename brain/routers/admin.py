@@ -641,6 +641,22 @@ def list_facts_route(
         return _degraded(exc, items=[])
 
 
+@router.get("/lessons")
+def list_lessons_route(
+    user_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=500),
+) -> Any:
+    """反刍学到的「下次怎么改」：按人查或者看全站最近几条。"""
+    try:
+        if user_id:
+            return {"items": config_store.list_lessons(user_id, limit=int(limit))}
+        from brain import db as database
+
+        return {"items": database.recent_lessons(limit=int(limit))}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
 @router.delete("/facts", dependencies=[Depends(_require_admin_token)])
 def delete_fact_route(id: str = Query(...)) -> Any:
     try:

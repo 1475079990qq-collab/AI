@@ -148,6 +148,17 @@ def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
         if len(loop_lines) > 1:
             blocks.append("\n".join(loop_lines))
 
+    # 2.6) 反刍：上一轮说完之后，自己复盘出的一条「下次怎么改」。
+    #      只放最近三条，且是具体的动作，不是“我要更自然”这种空话。
+    lessons = (bundle or {}).get("lessons") or []
+    lesson_lines = ["【自我复盘｜你自己总结过的，这一轮别重犯】"]
+    for item in lessons:
+        note = str((item or {}).get("note") or "").strip()
+        if note:
+            lesson_lines.append(f"- {note}")
+    if len(lesson_lines) > 1:
+        blocks.append("\n".join(lesson_lines))
+
     # 3) 近期情绪事件：label 值本身入文（冒烟测试可据此断言），并带 intensity
     emotions = (bundle or {}).get("emotions") or []
     emo_lines = ["近期情绪事件:"]

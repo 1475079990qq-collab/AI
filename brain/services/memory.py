@@ -45,11 +45,12 @@ def _runtime(top_k: int) -> tuple[float, int]:
 
 
 def _facts_only(user_id: str, query: str, top_k: int) -> tuple[list[dict], str]:
-    """只走 SQLite 的字面召回：取最近 200 条事实，按两字重合打分。"""
+    """三路线索合并召回：词重合 / 最近说过 / 带情绪（全在 SQLite 本地完成）。"""
     try:
         rows = db.search_facts(user_id, query, top_k)
         facts = [{"id": str(r["id"]), "text": str(r["text"]),
-                  "score": float(r["score"])} for r in rows]
+                  "score": float(r.get("score") or 0.0),
+                  "why": list(r.get("why") or [])} for r in rows]
         return facts, "sqlite"
     except Exception:
         return [], "sqlite"
@@ -107,6 +108,11 @@ def retrieve(user_id: str, query: str, top_k: int = 3) -> dict:
         open_loops = db.list_open_loops(user_id, limit=3)
     except Exception:
         open_loops = []
+    # 反刍：上一次说完话后自己复盘出来的那条「下次怎么改」，带进下一轮的提示词。
+    try:
+        lessons = db.list_lessons(user_id, limit=3)
+    except Exception:
+        lessons = []
     return {
         "facts": facts,
         "emotions": emotions,
@@ -115,6 +121,7 @@ def retrieve(user_id: str, query: str, top_k: int = 3) -> dict:
         "profile": profile_text,
         "episodes": episodes,
         "open_loops": open_loops,
+        "lessons": lessons,
         "identity": _identity(),
     }
 

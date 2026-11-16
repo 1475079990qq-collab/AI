@@ -159,6 +159,7 @@
       case 'prompt': return Math.min(90, 8 + Math.round((ev.chars || 0) / 26));
       case 'tool': return ev.hit ? 46 : 7;
       case 'llm_start': return 26;
+      case 'think_draft': return 14 + Math.round((ev.chars || 0) / 4);
       case 'first_token': return 34;
       case 'tokens': return 10 + Math.round((ev.chars || 0) / 12);
       case 'voice_start': return 26;
@@ -169,6 +170,9 @@
       case 'turn_error': return 38;
       case 'bg_start': return 14;
       case 'bg_done': return 10;
+      case 'self_check': return ev.verdict === 'pass' ? 14 : 34;
+      case 'ruminate_start': return 10;
+      case 'ruminate_done': return ev.verdict === 'pass' ? 12 : 22;
       default: return 0;
     }
   }
@@ -235,10 +239,12 @@
       case 'prompt': return 3;
       case 'tool': return 4;
       case 'llm_start': return 5;
+      case 'think_draft': return 5;
       case 'tokens': return 5;
       case 'first_token': return 6;
       case 'voice_start': case 'voice_done': case 'voice_error': return 7;
       case 'turn_done': case 'turn_error': case 'bg_start': case 'bg_done': return 8;
+      case 'self_check': case 'ruminate_start': case 'ruminate_done': return 8;
       default: return -1;
     }
   }
@@ -247,10 +253,14 @@
     switch (ev.kind) {
       case 'turn_start': return '输入 ' + (ev.text_len || 0) + ' 字';
       case 'judge': return (ev.emotion || '?') + ' · ' + (ev.ms || 0) + 'ms';
-      case 'memory': return '事实 ' + (ev.facts || 0) + ' / 情绪 ' + (ev.emotions || 0);
-      case 'prompt': return (ev.chars || 0) + ' 字上下文';
+      case 'memory':
+        var rt = ev.routes || null;
+        var extra = rt ? ' · 词' + (rt['词重合'] || 0) + ' 近' + (rt['最近说过'] || 0) +
+          ' 情' + (rt['带情绪'] || 0) : '';
+        return '事实 ' + (ev.facts || 0) + ' / 情绪 ' + (ev.emotions || 0) + extra;      case 'prompt': return (ev.chars || 0) + ' 字上下文';
       case 'tool': return (ev.name ? ev.name : '未命中') + (ev.ok ? ' ✓' : '');
       case 'llm_start': return '开始生成';
+      case 'think_draft': return '先想 ' + (ev.chars || 0) + ' 字 · ' + (ev.ms || 0) + 'ms';
       case 'first_token': return '首字 ' + (ev.ms || 0) + 'ms';
       case 'tokens': return '已出 ' + (ev.chars || 0) + ' 字';
       case 'voice_start': return '合成 ' + (ev.chars || 0) + ' 字';
@@ -260,6 +270,14 @@
       case 'turn_error': return '出错 · ' + (ev.code || '');
       case 'bg_start': return '后台消化…';
       case 'bg_done': return '消化完 · ' + (ev.ms || 0) + 'ms';
+      case 'self_check':
+        var rl = (ev.rules || []).join('、');
+        return (ev.verdict === 'pass' ? '自己听了一遍 · 没毛病' :
+          '自己听出 ' + (ev.rules || []).length + ' 处' + (rl ? '：' + rl : ''));
+      case 'ruminate_start': return '回头想刚才那句…';
+      case 'ruminate_done':
+        return (ev.verdict === 'pass' ? '复盘 · 这轮没毛病' :
+          '复盘 · ' + (ev.rule || '') + (ev.stored ? ' 已记住' : ''));
       default: return '';
     }
   }

@@ -29,6 +29,8 @@ except Exception:  # pragma: no cover
 log = logging.getLogger("brain.pipeline")
 
 _PING_INTERVAL = 15.0
+# 反刍延迟：人不会刚说完就立刻复盘，隔几秒再回头想才像自己的念头。
+_RUMINATE_DELAY = 6.0
 _NOTHING_HEARD = "嗯？我没听清，你再说一次好不好。"
 _MAINTENANCE = "系统正在做一点小小的维护，我很快就回来，你先照顾好自己，等会儿再陪你慢慢聊，好吗？"
 
@@ -224,6 +226,34 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
             live.emit("bg_done", job="自检与摘要", ok=ok,
                       ms=round((time.perf_counter() - _t_bg) * 1000.0, 1))
 
+        # ---- 反刍：等他走出几步再回头想（不打断、也不占这一轮的任何时间）----
+        try:
+            time.sleep(_RUMINATE_DELAY)
+            _t_ru = time.perf_counter()
+            live.emit("ruminate_start", delay_s=_RUMINATE_DELAY)
+            from brain.services import checks as _checks
+
+            # 反刍看的是「说得像不像人」，不看快慢，所以 latency 传 0
+            rules2, verdict2 = _checks.check_reply(
+                reply=reply, prev_reply=prev_reply, user_text=user_text,
+                prev_user=prev_user, latency_ms=0.0,
+                assistant_name=assistant_name, system_prompt=system_text,
+            )
+            loop_unit = _checks.find_repeat_loop(reply)
+            if loop_unit:
+                rules2 = list(rules2) + ["repeat_loop"]
+                verdict2 = "fail"
+            kind, note = _checks.note_for(rules2)
+            stored = False
+            if kind and verdict2 in ("fail", "warn"):
+                db.add_lesson(user_id=user_id, request_id=request_id,
+                              kind=kind, note=note, verdict=verdict2)
+                stored = True
+            live.emit("ruminate_done", verdict=verdict2, rule=kind, stored=stored,
+                      ms=round((time.perf_counter() - _t_ru) * 1000.0, 1))
+        except Exception:
+            log.exception("反刍失败（只影响这一条自我复盘）")
+
     try:
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(None, _do)
@@ -393,6 +423,10 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                   episodes=len(bundle.get("episodes") or []),
                   open_loops=len(bundle.get("open_loops") or []),
                   source=str(bundle.get("source") or ""),
+                  # 每一条事实是被哪条线索捞回来的：词重合 / 最近说过 / 带情绪
+                  routes={tag: sum(1 for f in (bundle.get("facts") or [])
+                                   if tag in (f.get("why") or []))
+                          for tag in ("词重合", "最近说过", "带情绪")},
                   # 这一轮到底「想起了哪几条」：脑图据此点亮对应的神经元，并带出联想
                   ids=[str(f.get("id")) for f in (bundle.get("facts") or []) if f.get("id")][:6],
                   ms=round((time.perf_counter() - _t_mem) * 1000.0, 1))
@@ -433,6 +467,31 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             log.exception("工具调用失败（这一轮按普通回答走）")
             tool_result = None
             live.emit("tool", name="", hit=False, ok=False, ms=0.0)
+
+        # ---- 5.7) 「先想后说」：开关打开时，先在肚子里过一句（可关，默认关）----
+        # 为什么做成开关：这台机器出字约 8 字/秒，多一次短推理就要多等 3~4 秒。
+        # 默认关是保陪伴的节奏；想要更像人，就在 runtime_params 里把 think_draft 设成 1。
+        if str((runtime or {}).get("think_draft") or "0").lower() in ("1", "true", "on"):
+            stage = "draft"
+            try:
+                _t_draft = time.perf_counter()
+                draft_params = dict(effective_params or {})
+                draft_params["max_tokens"] = 48
+                draft_parts: list[str] = []
+                async for piece in llm.stream(messages, draft_params):
+                    draft_parts.append(str(piece))
+                    if len("".join(draft_parts)) >= 64:
+                        break
+                draft = "".join(draft_parts).strip()
+                live.emit("think_draft", chars=len(draft),
+                          ms=round((time.perf_counter() - _t_draft) * 1000.0, 1))
+                if draft:
+                    messages[0]["content"] += (
+                        "\n\n【你刚才在心里先过了一句（只有你自己听得见，别念出来、别复述）："
+                        + draft + "】"
+                    )
+            except Exception:
+                log.exception("先想后说失败（这一轮直接说）")
 
         # ---- 6) LLM 流式输出：逐 token + 按 sse_ping_interval 空闲插 ping ----
         # LLM 生成器跑在独立 task 里：ping 计时只 cancel Queue.get（安全），
@@ -550,6 +609,30 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                 break
         summary = "".join(reply)
 
+        # ---- 6.9) 说完了，回头听一遍：规则自检，毫秒级，只报不改嘴 ----
+        # 为什么现在做而不是只在后台：这是「说话时自己在听」的那一下，
+        # 判完之后这一轮的反面例子会写进下一轮的自我复盘，而不是永远沉在日志里。
+        try:
+            from brain.services import checks as _checks
+
+            rules_now, verdict_now = _checks.check_reply(
+                reply=summary, prev_reply=prev_reply, user_text=req.text,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                assistant_name=str((runtime or {}).get("assistant_name") or "").strip(),
+                system_prompt=((messages[0].get("content") if messages else "") or ""),
+            )
+            loop_unit = _checks.find_repeat_loop(summary)
+            if loop_unit:
+                rules_now = list(rules_now) + ["repeat_loop"]
+                verdict_now = "fail"
+            live.emit("self_check", rules=rules_now, verdict=verdict_now,
+                      chars=len(summary), loop=loop_unit)
+            self_rules = rules_now
+            self_verdict = verdict_now
+        except Exception:
+            self_rules, self_verdict = [], "pass"
+            log.exception("出口自检失败（不影响这一轮回答）")
+
         # ---- 7) 流后只 update，关闭事件 ----
         # summary 保留开流时写入的用户短摘要；整段回复另存 reply_text，
         # 避免下一轮把好几段旧回复当成「情绪摘要」塞进 prompt。
@@ -608,6 +691,8 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                   emotion=emotion.label,
                   intensity=float(emotion.intensity or 0),
                   status="ok",
+                  verdict=self_verdict,
+                  rules=self_rules,
                   card=str(card.get("kind") or "") if card else "")
 
         # ---- 8.5) 流结束后自动沉淀（后台线程，不阻塞 SSE）----

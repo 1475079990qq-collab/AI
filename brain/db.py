@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS turn_checks (
     note       TEXT NOT NULL DEFAULT ''
 );
 
+-- 反刍：说完话之后，自己回头复盘学到的这一条。
+-- 和人一样，错的不是「下次注意」这种空话，而是一条能改的规矩。
+CREATE TABLE IF NOT EXISTS lessons (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    user_id    TEXT NOT NULL,
+    request_id TEXT,
+    kind       TEXT NOT NULL,
+    note       TEXT NOT NULL,
+    verdict    TEXT NOT NULL DEFAULT ''
+);
+
 -- 反馈信号：显式（对了/不对）与隐式（打断/重说/续聊）统一入库。
 CREATE TABLE IF NOT EXISTS feedback (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -524,7 +536,13 @@ def _bigrams(text: str) -> set[str]:
 
 
 def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
-    """零依赖的中文 bigram 相似度检索（本程序不做向量召回，只留这一条路）。"""
+    """人不会只用一种线索回忆：词像、最近说过、带着情绪，三路一起上来。
+
+    - 词重合：本轮 query 与事实共享的两字词比例（原来的唯一路径）
+    - 最近说过：越新的事越容易被想起（权重低，只做次级线索）
+    - 带情绪：metadata 里记过情绪的，容易被同类话题勾出来
+    score 仍以词重合为主，后两项只加分；`why` 记录这一条是被哪条线索捞回来的。
+    """
     conn = connect()
     try:
         rows = conn.execute(
@@ -537,13 +555,28 @@ def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
     qb = _bigrams(query)
     if not qb:
         return []
+    total = max(1, len(rows))
     scored: list[dict] = []
-    for row in rows:
+    for idx, row in enumerate(rows):
         fb = _bigrams(row["text"])
-        score = len(qb & fb) / max(1, len(qb))
-        if score > 0:
-            scored.append({"id": row["id"], "text": row["text"], "score": round(score, 4),
-                           "metadata": row["metadata"]})
+        sim = len(qb & fb) / max(1, len(qb))
+        recent = 1.0 - (idx / total)               # 1.0 = 最新那条
+        emo = 0.18 if '"emotion"' in (row["metadata"] or "") else 0.0
+        if sim <= 0 and recent < 0.55:
+            continue
+        why: list[str] = []
+        if sim > 0:
+            why.append("词重合")
+        if recent >= 0.55:
+            why.append("最近说过")
+        if emo:
+            why.append("带情绪")
+        scored.append({
+            "id": row["id"], "text": row["text"],
+            "score": round(sim + recent * 0.22 + emo, 4),
+            "sim": round(sim, 4), "why": why,
+            "metadata": row["metadata"],
+        })
     scored.sort(key=lambda item: item["score"], reverse=True)
     return scored[:int(top_k)]
 
@@ -749,6 +782,48 @@ def recent_checks(limit: int = 50) -> list[dict]:
         rows = conn.execute(
             "SELECT * FROM turn_checks ORDER BY id DESC LIMIT ?", (int(limit),),
         ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def add_lesson(*, user_id: str, request_id: str, kind: str, note: str,
+               verdict: str = "", keep: int = 200) -> int:
+    """反刍留下的这一条经验；只留最近 keep 条，避免无限堆积。"""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO lessons(created_at,user_id,request_id,kind,note,verdict) "
+            "VALUES(?,?,?,?,?,?)",
+            (_now(), str(user_id), str(request_id), str(kind), str(note), str(verdict)),
+        )
+        conn.execute(
+            "DELETE FROM lessons WHERE id <= (SELECT id FROM lessons ORDER BY id DESC LIMIT 1 OFFSET ?)",
+            (max(1, int(keep)),),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def list_lessons(user_id: str, limit: int = 3) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM lessons WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (str(user_id), int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def recent_lessons(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute("SELECT * FROM lessons ORDER BY id DESC LIMIT ?",
+                            (int(limit),)).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
