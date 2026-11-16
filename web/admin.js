@@ -103,18 +103,20 @@
     return ['1', 'true', 'yes', 'on'].indexOf(String(v == null ? '' : v).toLowerCase()) >= 0;
   }
 
+  // 控制台地址只认「当前打开的这份配置」：?console= 参数 > config.local.js > 当前页面来源。
+  // 以前会把地址存进 localStorage，一旦早期版本存过 :8001，升级后旧值还会被优先使用，
+  // 于是明明服务在 8000 却去连一个不存在的端口。这里不再读缓存，避免地址"记旧账"。
   function resolveConsoleUrl() {
     if (CFG.CONSOLE_OVERRIDE) {
       safeSet(LS_CONSOLE, CFG.CONSOLE_OVERRIDE);
       return CFG.CONSOLE_OVERRIDE;
     }
-    var saved = (safeGet(LS_CONSOLE) || '').trim();
-    return saved || CFG.CONSOLE_URL || 'http://localhost:8001';
+    return CFG.CONSOLE_URL || ((typeof location !== 'undefined' && location.origin) || 'http://localhost:8000');
   }
 
   function chatHref() {
     var brain = (safeGet(LS_BRAIN) || '').trim() || CFG.BRAIN_OVERRIDE || CFG.BRAIN_URL || '';
-    var consoleUrl = CFG.CONSOLE_OVERRIDE || (safeGet(LS_CONSOLE) || '').trim() || CFG.CONSOLE_URL || '';
+    var consoleUrl = resolveConsoleUrl();
     var q = [];
     if (brain) q.push('brain=' + encodeURIComponent(brain));
     if (consoleUrl) q.push('console=' + encodeURIComponent(consoleUrl));
@@ -143,7 +145,7 @@
         body: (body === undefined || body === null) ? undefined : JSON.stringify(body)
       });
     } catch (e) {
-      throw new Error('无法连接控制台 ' + resolveConsoleUrl() + '（请确认 :8001 已启动）');
+      throw new Error('无法连接控制台 ' + resolveConsoleUrl() + '（确认 1-启动.bat 那个窗口还开着、没有报错退出）');
     }
     var text = await resp.text();
     var data = null;
@@ -215,7 +217,7 @@
   function renderDegrade(el, err, name) {
     el.innerHTML = '<div class="empty error-text">「' + esc(name) + '」暂不可用：' +
       esc(err && err.message ? err.message : String(err)) +
-      '<br><span class="muted">请确认控制平面已升级到 v2（:8001 /api/admin/* 新接口）；其余板块不受影响。</span></div>';
+      '<br><span class="muted">如果地址不对，看 web/config.local.js 里的 console_port；其余板块不受影响。</span></div>';
   }
 
   function simpleTable(headers, rows) {

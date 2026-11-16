@@ -20,7 +20,8 @@
   // 端口由启动时生成的 config.local.js 提供，改 config.yaml 后重启即生效。
   var local = window.COMPANION_LOCAL || {};
   var brainPort = local.brain_port || 8000;
-  var consolePort = local.console_port || 8001;
+  // 控制台已并入大脑进程（同一个 8000），没有单独端口了；config.local.js 没生成时也按 8000 兜底。
+  var consolePort = local.console_port || brainPort;
 
   var cfg = {
     BRAIN_URL: brainParam || ('http://' + host + ':' + brainPort),
