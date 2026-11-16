@@ -209,12 +209,17 @@ RUNTIME_RULES: dict[str, dict[str, Any]] = {
     "sse_ping_interval":     {"min": 5, "max": 120, "type": "int", "desc": "流式推送的心跳间隔(秒)"},
     "max_concurrency":       {"min": 1, "max": 4, "type": "int", "desc": "同时进行的对话数"},
     "think_draft":           {"min": 0, "max": 1, "type": "int", "desc": "1=先在心里过一句再说（每轮多 3~4 秒）"},
+    "reflect_enabled":       {"min": 0, "max": 1, "type": "int", "desc": "1=说完后后台自我复盘（不进回复链路，不拖慢开口）"},
+    "reflect_sample_n":      {"min": 1, "max": 20, "type": "int", "desc": "自检通过的轮次每 N 轮抽样复盘一次"},
+    "reflect_timeout_s":     {"min": 1, "max": 15, "type": "int", "desc": "复盘模型单次超时(秒)，超时自动降级规则级"},
+    "reflect_base_url":      {"type": "text", "desc": "复盘模型地址（留空=跟随对话大模型卡；仅本地）"},
+    "reflect_model":         {"type": "text", "desc": "复盘型号（留空=跟随对话大模型卡）"},
 }
 
 DEFAULT_SWITCHES: dict[str, str] = {
     "maintenance_mode": "0", "log_prompt": "1", "log_input_text": "1",
     "knowledge_inject": "1", "auto_remember": "1", "sse_ping_interval": "15",
-    "max_concurrency": "1", "think_draft": "0",
+    "max_concurrency": "1", "think_draft": "0", "reflect_enabled": "1",
 }
 
 # 8 类情绪 → 语音默认映射（向量顺序：happy/angry/sad/afraid/disgusted/melancholic/surprised/calm）
@@ -811,6 +816,21 @@ def turn_stats() -> dict:
 
 def list_facts(user_id: str | None = None, limit: int = 100) -> list[dict]:
     sql = "SELECT * FROM facts WHERE 1=1"
+    args: list[Any] = []
+    if user_id:
+        sql += " AND user_id=?"
+        args.append(user_id)
+    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    args.append(int(limit))
+    conn = db.connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+
+def list_lessons(user_id: str | None = None, limit: int = 50) -> list[dict]:
+    sql = "SELECT * FROM lessons WHERE 1=1"
     args: list[Any] = []
     if user_id:
         sql += " AND user_id=?"

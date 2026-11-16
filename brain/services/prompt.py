@@ -149,13 +149,24 @@ def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
             blocks.append("\n".join(loop_lines))
 
     # 2.6) 反刍：上一轮说完之后，自己复盘出的一条「下次怎么改」。
-    #      只放最近三条，且是具体的动作，不是“我要更自然”这种空话。
+    #      条数 / 字数都有预算：最多 3 条、每条 180 字、整段 480 字，别把 prompt 撑爆。
     lessons = (bundle or {}).get("lessons") or []
     lesson_lines = ["【自我复盘｜你自己总结过的，这一轮别重犯】"]
-    for item in lessons:
+    _LESSON_MAX = 3
+    _LESSON_CHARS = 180
+    _LESSON_BUDGET = 480
+    _lesson_used = 0
+    for item in lessons[:_LESSON_MAX]:
         note = str((item or {}).get("note") or "").strip()
-        if note:
-            lesson_lines.append(f"- {note}")
+        if not note:
+            continue
+        note = "\n".join(line.strip() for line in note.splitlines() if line.strip())
+        if len(note) > _LESSON_CHARS:
+            note = note[:_LESSON_CHARS] + "…"
+        if _lesson_used + len(note) > _LESSON_BUDGET:
+            break
+        _lesson_used += len(note)
+        lesson_lines.append(f"- {note}")
     if len(lesson_lines) > 1:
         blocks.append("\n".join(lesson_lines))
 

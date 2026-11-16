@@ -229,11 +229,23 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _add_column(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    """老库补一列；列已存在或表不存在都静默跳过，绝不阻断启动。"""
+    try:
+        cols = {str(r["name"]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    except sqlite3.OperationalError:
+        pass
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """对已有库做向后兼容升级（幂等，失败不阻断启动）。
 
     - emotion_events.reply_text：把「情绪摘要」和「整段回复」拆成两列，
       老库补列后历史行的 reply_text 为空，读侧按空串处理。
+    - lessons 真反思字段：source/model 或 rule、why/how 两段、confidence、降级原因。
+      老列 id/created_at/user_id/request_id/kind/note/verdict 原样保留。
     """
     try:
         cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(emotion_events)").fetchall()}
@@ -241,6 +253,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE emotion_events ADD COLUMN reply_text TEXT NOT NULL DEFAULT ''")
     except sqlite3.OperationalError:
         pass
+    _add_column(conn, "lessons", "source", "TEXT NOT NULL DEFAULT 'rule'")
+    _add_column(conn, "lessons", "why", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "lessons", "how", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "lessons", "confidence", "REAL NOT NULL DEFAULT 0")
+    _add_column(conn, "lessons", "degrade_reason", "TEXT NOT NULL DEFAULT ''")
 
 
 def init_db() -> None:
@@ -787,22 +804,65 @@ def recent_checks(limit: int = 50) -> list[dict]:
         conn.close()
 
 
+def _note_similar(a: str, b: str) -> float:
+    """两条教训的两字重合度；用于相近教训合并，避免同一类问题堆几十行。"""
+    ga, gb = _bigrams(a), _bigrams(b)
+    if not ga or not gb:
+        return 0.0
+    return len(ga & gb) / max(1, len(ga | gb))
+
+
 def add_lesson(*, user_id: str, request_id: str, kind: str, note: str,
-               verdict: str = "", keep: int = 200) -> int:
-    """反刍留下的这一条经验；只留最近 keep 条，避免无限堆积。"""
+               verdict: str = "", keep: int = 200, source: str = "rule",
+               why: str = "", how: str = "", confidence: float = 0.0,
+               degrade_reason: str = "") -> tuple[int, bool]:
+    """记一条复盘经验；同用户同类型（或文本高度相近）的旧教训直接合并更新。
+
+    返回 (lesson_id, merged)：merged=True 表示没有新增行，而是更新了旧教训。
+    只留最近 keep 条，避免无限堆积。既有列 id/created_at/user_id/request_id/
+    kind/note/verdict 一个不少，新增列只做补充。
+    """
+    note = str(note or "").strip()
     conn = connect()
     try:
+        rows = conn.execute(
+            "SELECT id, kind, note FROM lessons WHERE user_id=? "
+            "ORDER BY id DESC LIMIT 30", (str(user_id),),
+        ).fetchall()
+        merged_id: int | None = None
+        for r in rows:
+            if str(r["kind"]) == str(kind):
+                merged_id = int(r["id"])
+                break
+        if merged_id is None:
+            for r in rows:
+                if _note_similar(str(r["note"] or ""), note) >= 0.8:
+                    merged_id = int(r["id"])
+                    break
+        if merged_id is not None:
+            conn.execute(
+                "UPDATE lessons SET request_id=?, kind=?, note=?, verdict=?, source=?, "
+                "why=?, how=?, confidence=?, degrade_reason=?, created_at=? WHERE id=?",
+                (str(request_id), str(kind), note, str(verdict), str(source or "rule"),
+                 str(why or ""), str(how or ""), float(confidence or 0.0),
+                 str(degrade_reason or ""), _now(), merged_id),
+            )
+            conn.commit()
+            return merged_id, True
         cur = conn.execute(
-            "INSERT INTO lessons(created_at,user_id,request_id,kind,note,verdict) "
-            "VALUES(?,?,?,?,?,?)",
-            (_now(), str(user_id), str(request_id), str(kind), str(note), str(verdict)),
+            "INSERT INTO lessons(created_at,user_id,request_id,kind,note,verdict,"
+            "source,why,how,confidence,degrade_reason) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (_now(), str(user_id), str(request_id), str(kind), note, str(verdict),
+             str(source or "rule"), str(why or ""), str(how or ""),
+             float(confidence or 0.0), str(degrade_reason or "")),
         )
         conn.execute(
             "DELETE FROM lessons WHERE id <= (SELECT id FROM lessons ORDER BY id DESC LIMIT 1 OFFSET ?)",
             (max(1, int(keep)),),
         )
         conn.commit()
-        return int(cur.lastrowid or 0)
+        return int(cur.lastrowid or 0), False
     finally:
         conn.close()
 

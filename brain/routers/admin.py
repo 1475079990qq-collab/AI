@@ -339,6 +339,11 @@ def _validate_param(key: str, value: Any) -> str:
     rule = PARAM_RULES.get(key)
     if rule is None:
         raise HTTPException(status_code=422, detail=f"param '{key}' not in whitelist")
+    if rule.get("type") == "text":
+        text = str(value or "").strip()
+        if len(text) > 200:
+            raise HTTPException(status_code=422, detail=f"{key} too long (≤200)")
+        return text
     try:
         num = float(value)
     except (TypeError, ValueError):

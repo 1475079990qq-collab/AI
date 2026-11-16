@@ -31,6 +31,8 @@ log = logging.getLogger("brain.pipeline")
 _PING_INTERVAL = 15.0
 # 反刍延迟：人不会刚说完就立刻复盘，隔几秒再回头想才像自己的念头。
 _RUMINATE_DELAY = 6.0
+# 同一用户的复盘单飞：上一轮复盘还没跑完，这一轮不叠第二个，避免本地小模型被占住。
+_reflect_busy: set[str] = set()
 _NOTHING_HEARD = "嗯？我没听清，你再说一次好不好。"
 _MAINTENANCE = "系统正在做一点小小的维护，我很快就回来，你先照顾好自己，等会儿再陪你慢慢聊，好吗？"
 
@@ -188,10 +190,14 @@ def _schedule_remember(user_text: str, emotion_label: str,
 def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str,
                          reply: str, history: list[dict] | None,
                          latency_ms: float, system_text: str,
-                         runtime: dict, user_id: str) -> None:
-    """流结束后的后台功课：规则自检 + 每日摘要 + 待办识别。
+                         runtime: dict, user_id: str,
+                         bundle: dict | None = None, tool_summary: str = "",
+                         emotion_label: str = "neutral",
+                         emotion_intensity: float = 0.0) -> None:
+    """流结束后的后台功课：规则自检 + 每日摘要 + 待办识别 + 自我复盘。
 
-    全部丢线程池，绝不进 SSE 热路径；任何异常只记日志。
+    全部丢线程池，绝不进 SSE 热路径；任何异常只记日志。复盘模型调用在
+    6 秒延迟之后的后台线程里，硬超时由 reflect 模块兜底，不占这一轮的开口时间。
     """
     prev_reply = _prev_reply(history)
     prev_user = ""
@@ -227,11 +233,14 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
                       ms=round((time.perf_counter() - _t_bg) * 1000.0, 1))
 
         # ---- 反刍：等他走出几步再回头想（不打断、也不占这一轮的任何时间）----
+        reflect_payload: dict = {}
+        stored = False
         try:
             time.sleep(_RUMINATE_DELAY)
             _t_ru = time.perf_counter()
-            live.emit("ruminate_start", delay_s=_RUMINATE_DELAY)
+            live.emit("ruminate_start", request_id=request_id, delay_s=_RUMINATE_DELAY)
             from brain.services import checks as _checks
+            from brain.services import reflect as reflect_svc
 
             # 反刍看的是「说得像不像人」，不看快慢，所以 latency 传 0
             rules2, verdict2 = _checks.check_reply(
@@ -243,14 +252,73 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
             if loop_unit:
                 rules2 = list(rules2) + ["repeat_loop"]
                 verdict2 = "fail"
-            kind, note = _checks.note_for(rules2)
-            stored = False
-            if kind and verdict2 in ("fail", "warn"):
-                db.add_lesson(user_id=user_id, request_id=request_id,
-                              kind=kind, note=note, verdict=verdict2)
+
+            ctx = {
+                "user_text": user_text, "reply": reply,
+                "prev_reply": prev_reply, "prev_user": prev_user,
+                "rules": rules2, "verdict": verdict2,
+                "emotion": emotion_label, "intensity": emotion_intensity,
+                "facts": (bundle or {}).get("facts") or [],
+                "episodes": (bundle or {}).get("episodes") or [],
+                "open_loops": (bundle or {}).get("open_loops") or [],
+                "tool_summary": tool_summary,
+            }
+
+            # 单飞：同一用户上一轮复盘没结束，这一轮直接跳过模型复盘。
+            busy = user_id in _reflect_busy
+            want_reflect = (not busy) and reflect_svc.should_reflect(
+                runtime, verdict2, rules2, user_id)
+            if want_reflect:
+                _reflect_busy.add(user_id)
+            try:
+                if want_reflect:
+                    reflect_payload = reflect_svc.run(ctx, runtime)
+                else:
+                    # 开关关 / 抽样没中 / 单飞重叠：保留旧的规则级记录路径。
+                    kind, note = _checks.note_for(rules2)
+                    fb_why, fb_how = "", note
+                    if busy:
+                        reason = "上一轮复盘未结束，本轮单飞跳过"
+                    else:
+                        reason = "未命中复盘触发条件（开关/抽样）"
+                    reflect_payload = {
+                        "kind": kind, "verdict": verdict2, "why": fb_why, "how": fb_how,
+                        "note": note, "source": "rule", "confidence": 0.3,
+                        "degrade_reason": reason, "ms": 0.0, "used_model": "",
+                    }
+            finally:
+                if want_reflect:
+                    _reflect_busy.discard(user_id)
+
+            kind = str(reflect_payload.get("kind") or "")
+            note = str(reflect_payload.get("note") or "")
+            why = str(reflect_payload.get("why") or "")
+            how = str(reflect_payload.get("how") or "")
+            # fail/warn 必落库；pass 抽样复盘只有模型给出了具体改法才记一条，
+            # 规则兜底的空泛结论不刷条数。
+            should_store = bool(kind and note) and (
+                verdict2 in ("fail", "warn")
+                or (verdict2 == "pass" and reflect_payload.get("source") == "model" and how)
+            )
+            if should_store:
+                db.add_lesson(
+                    user_id=user_id, request_id=request_id, kind=kind, note=note,
+                    verdict=verdict2, source=str(reflect_payload.get("source") or "rule"),
+                    why=why, how=how,
+                    confidence=float(reflect_payload.get("confidence") or 0.0),
+                    degrade_reason=str(reflect_payload.get("degrade_reason") or ""),
+                )
                 stored = True
-            live.emit("ruminate_done", verdict=verdict2, rule=kind, stored=stored,
-                      ms=round((time.perf_counter() - _t_ru) * 1000.0, 1))
+            live.emit(
+                "ruminate_done", request_id=request_id, verdict=verdict2, rule=kind,
+                stored=stored,
+                ms=round((time.perf_counter() - _t_ru) * 1000.0, 1),
+                why=why, how=how, source=reflect_payload.get("source"),
+                confidence=reflect_payload.get("confidence"),
+                degrade_reason=reflect_payload.get("degrade_reason"),
+                reflect_ms=reflect_payload.get("ms"),
+                used_model=reflect_payload.get("used_model"),
+            )
         except Exception:
             log.exception("反刍失败（只影响这一条自我复盘）")
 
@@ -686,6 +754,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             "truncated": False,
         })
         live.emit("turn_done",
+                  request_id=request_id,
                   ms=round((time.perf_counter() - started) * 1000.0, 1),
                   chars=len(summary),
                   emotion=emotion.label,
@@ -711,6 +780,10 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             system_text=((messages[0].get("content") if messages else "") or ""),
             runtime=runtime,
             user_id=req.user_id,
+            bundle=bundle,
+            tool_summary=(str(tool_result.get("summary") or "") if tool_result else ""),
+            emotion_label=emotion.label,
+            emotion_intensity=float(emotion.intensity or 0.0),
         )
 
     except asyncio.CancelledError:
