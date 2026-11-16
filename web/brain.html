@@ -66,13 +66,14 @@
   .row:last-child { border-bottom: 0; }
   .row .sw { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; }
   .row .main { min-width: 0; }
-  .row .line1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-  .row .nm { font-size: 11.5px; }
+  .row .line1 { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 2px 10px; }
+  .row .nm { flex: 0 1 auto; font-size: 11.5px; }
   .row .val {
-    font-size: 10.5px; color: var(--muted); text-align: right; min-width: 0;
-    overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+    flex: 1 1 auto; min-width: 0; font-size: 10.5px; color: var(--muted);
+    text-align: right; white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+    font-variant-numeric: tabular-nums;
   }
-  /* 说明文字按词整体换行，不在中文/「上限 300」中间硬折 */
+  /* 说明文字按词整体换行，不在中文/上限数字中间硬折 */
   .row .hint {
     margin-top: 1px; font-size: 10px; color: #6e797d; line-height: 1.4;
     word-break: keep-all; overflow-wrap: normal;
@@ -83,7 +84,7 @@
 
   .feed { padding: 10px 14px 8px; flex: 0 0 auto; }
   .feed .line { display: flex; gap: 8px; padding: 1px 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
-  .feed .k { color: #93a0a4; flex: 0 0 56px; }
+  .feed .k { color: #93a0a4; flex: 0 0 78px; }
   .feed .region { color: #93a0a4; flex: 0 0 54px; }
   .feed .line b { color: var(--ink); font-weight: 600; }
 
