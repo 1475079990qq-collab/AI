@@ -32,6 +32,9 @@
     background: rgba(255,255,255,.02);
   }
   .pill b { color: var(--ink); font-weight: 600; }
+  .pill-btn { cursor: pointer; color: var(--ink); font: inherit; font-size: 12px; }
+  .pill-btn:hover { border-color: rgba(95,208,180,.45); }
+  .pill-btn.on { background: rgba(95,208,180,.14); border-color: rgba(95,208,180,.5); }
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #6b7478; }
   .dot.on { background: var(--accent); box-shadow: 0 0 10px rgba(95,208,180,.8); }
   .dot.err { background: #e07a72; box-shadow: 0 0 10px rgba(224,122,114,.7); }
@@ -71,11 +74,14 @@
 <div class="wrap">
   <div class="head">
     <h1>思考现场</h1>
-    <span class="sub">每条脉冲 = 大脑这一次真实走过的一站；不抖假数据</span>
+    <span class="sub">每个亮点都是一个神经元；亮多少、亮多久由真实事件决定，不随机抖</span>
     <div class="right">
       <span class="pill"><span class="dot" id="conn-dot"></span> <span id="conn-txt">连接中…</span></span>
       <span class="pill">本轮 <b id="turn-ms">—</b></span>
+      <span class="pill">点亮 <b id="fired">0</b></span>
+      <span class="pill">峰值 <b id="peak">0.00</b></span>
       <span class="pill">事件 <b id="ev-count">0</b></span>
+      <button class="pill pill-btn" id="hold-btn" type="button">定格</button>
       <a class="back" href="admin.html">← 回控制台</a>
     </div>
   </div>
@@ -83,7 +89,7 @@
   <div class="layout">
     <div>
       <div class="panel legend" id="legend">
-        <div class="t">九站 · 真实阶段</div>
+        <div class="t">九个脑区 · <span id="legend-count">0</span> 个神经元</div>
         <div id="legend-rows"></div>
         <div class="where">
           数据源 <code>/api/admin/live/stream</code>（SSE）。<br>
@@ -101,8 +107,8 @@
   </div>
 
   <div class="foot">
-    位置 = 固定编组（输入 → 判断 → 记忆 → 提示词 → 工具 → 思考 → 出字 → 声音 → 收尾），不随数据乱跑。<br>
-    节点亮度与余晖来自事件时刻与耗时；旁边的细点是该站最近通过的次数，亮一颗代表真的又过一次。
+    位置 = 固定的脑形编组（听见 → 判断 → 记忆 → 提示词 → 工具 → 思考 → 出字 → 声音 → 收尾），不随数据乱跑。<br>
+    放电量来自真实量级：情绪强度、事实条数、上下文字数、已出字数、语音 KB；停下来后按真实时刻留 2 秒余辉，不凭空造脉冲。
   </div>
 </div>
 <script src="brain.js"></script>
