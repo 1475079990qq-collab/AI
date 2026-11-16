@@ -231,6 +231,14 @@ def feedback(body: FeedbackBody) -> JSONResponse:
         return JSONResponse(status_code=503, content={"ok": False, "detail": "FEEDBACK_UNAVAILABLE"})
     if body.delivery_id and verdict != 0:
         db.set_delivery_verdict(int(body.delivery_id), verdict)
+    # 他说「对了」＝这轮语色过关，原样留一份当将来 LoRA 的料。
+    # 存失败不影响回执：语料是慢慢攒的，不能因为它把反馈弄丢。
+    if verdict == 1 and body.request_id:
+        try:
+            if db.capture_tone_sample(body.request_id):
+                log.info("语料 +1  %s", body.request_id)
+        except Exception:
+            log.exception("沉淀语料失败")
     log.info("反馈  %s  ｜%s", kind, (body.target or "")[:24])
     return JSONResponse(content={"ok": True, "kind": kind})
 

@@ -180,6 +180,21 @@ CREATE TABLE IF NOT EXISTS proactive_msgs (
     delivered_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_proactive_user ON proactive_msgs(user_id, delivered_at);
+
+-- 口吻正样本：他点过「对了」的轮次，原样留一份。
+-- 不训练、只积累——攒够 300–500 条，LoRA 才有料。
+-- 存的是清洗后的正文（不含括号旁白），因为训练时不该学那些。
+CREATE TABLE IF NOT EXISTS tone_samples (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    request_id    TEXT NOT NULL UNIQUE,
+    user_id       TEXT,
+    input_text    TEXT NOT NULL DEFAULT '',
+    reply_text    TEXT NOT NULL DEFAULT '',
+    emotion_label TEXT NOT NULL DEFAULT '',
+    intensity     REAL NOT NULL DEFAULT 0,
+    note          TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -784,6 +799,82 @@ def add_feedback(*, request_id: str, kind: str, reason: str = "",
             (_now(), str(request_id or ""), str(kind), str(reason or ""), str(target or "")),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+_TONE_SAMPLE_DDL = """
+CREATE TABLE IF NOT EXISTS tone_samples (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at    TEXT NOT NULL,
+    request_id    TEXT NOT NULL UNIQUE,
+    user_id       TEXT,
+    input_text    TEXT NOT NULL DEFAULT '',
+    reply_text    TEXT NOT NULL DEFAULT '',
+    emotion_label TEXT NOT NULL DEFAULT '',
+    intensity     REAL NOT NULL DEFAULT 0,
+    note          TEXT NOT NULL DEFAULT ''
+)
+"""
+
+
+def capture_tone_sample(request_id: str, note: str = "") -> bool:
+    """把这轮「他说对了」的输入+回复存进口吻语料。返回是否真的存进去。
+
+    只在 verdict=1 时调用；同一 request_id 只存一次（前端重复点勾不会灌水）。
+    取自 turn_logs，而不是请求体——客户端说什么都可以，日志里那版才是真说出去的。
+    """
+    req = str(request_id or "").strip()
+    if not req:
+        return False
+    conn = connect()
+    try:
+        conn.execute(_TONE_SAMPLE_DDL)
+        row = conn.execute(
+            "SELECT user_id,input_text,reply_text,emotion_label,intensity "
+            "FROM turn_logs WHERE request_id=? ORDER BY id DESC LIMIT 1",
+            (req,),
+        ).fetchone()
+        if not row:
+            return False
+        reply = str(row["reply_text"] or "").strip()
+        user_text = str(row["input_text"] or "").strip()
+        # 空回复、太短的（「嗯」「好呀」）当不成训练样本，只会教坏语感
+        if len(reply) < 8 or not user_text:
+            return False
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO tone_samples"
+            "(created_at,request_id,user_id,input_text,reply_text,emotion_label,intensity,note) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (_now(), req, row["user_id"], user_text, reply,
+             str(row["emotion_label"] or ""), float(row["intensity"] or 0.0), str(note or "")),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def count_tone_samples() -> int:
+    conn = connect()
+    try:
+        conn.execute(_TONE_SAMPLE_DDL)
+        row = conn.execute("SELECT COUNT(*) FROM tone_samples").fetchone()
+        return int(row[0] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def list_tone_samples(limit: int = 500) -> list[dict]:
+    conn = connect()
+    try:
+        conn.execute(_TONE_SAMPLE_DDL)
+        rows = conn.execute(
+            "SELECT created_at,request_id,user_id,input_text,reply_text,emotion_label,intensity "
+            "FROM tone_samples ORDER BY id DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
