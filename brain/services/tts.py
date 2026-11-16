@@ -93,6 +93,7 @@ def status(force: bool = False) -> dict:
     """给 /health 用：语音引擎现在跑在本进程里，直接查引擎状态。"""
     cfg = _cfg()
     mode = str(cfg.get("mode") or "inproc").strip().lower()
+    backend = str(settings.TTS_BACKEND or "")
     if mode == "http":
         try:
             from brain.services import model_status
@@ -101,18 +102,22 @@ def status(force: bool = False) -> dict:
         except Exception:
             remote = {"up": False, "detail": "probe failed"}
         return {"mode": "http", "endpoint": _endpoint(cfg),
-                "up": bool(remote.get("up")), "detail": str(remote.get("detail") or "")}
+                "up": bool(remote.get("up")), "detail": str(remote.get("detail") or ""),
+                "backend": backend}
     try:
         from brain import tts_server
 
         state = getattr(tts_server, "_state", {}) or {}
         up = bool(state.get("ready"))
-        detail = "引擎已就绪" if up else str(state.get("error") or "引擎未加载（首次合成时加载）")
+        # detail 取引擎最近一次失败原文；就绪时留空，不再写"引擎已就绪"这类寒暄。
+        detail = "" if up else str(state.get("error") or "引擎未加载（首次合成时加载）")
         return {"mode": "inproc", "endpoint": "inproc://tts_server",
-                "up": up, "detail": detail}
+                "up": up, "detail": detail,
+                "backend": backend or str(state.get("backend") or "")}
     except Exception as exc:
         return {"mode": "inproc", "endpoint": "inproc://tts_server",
-                "up": False, "detail": f"引擎不可用：{type(exc).__name__}"}
+                "up": False, "detail": f"引擎不可用：{type(exc).__name__}",
+                "backend": backend}
 
 
 async def synthesize(text: str, emotion: str,

@@ -280,12 +280,21 @@ async def tts_endpoint(req: TTSRequest) -> Response:
     started = time.perf_counter()
     try:
         audio = await tts.synthesize(req.text, req.emotion, req.reference_audio_id)
-    except Exception:
+    except Exception as exc:
         log.exception("tts synthesize failed")
-        return JSONResponse(status_code=503, content={"detail": "TTS_UNAVAILABLE"})
+        # 干净首句：去换行/压缩空白/截 160 字；code 保留旧字段兼容前端与冒烟。
+        detail = " ".join(str(exc).replace("\r", " ").replace("\n", " ").split())
+        for sep in ("。", "；", ";"):
+            if sep in detail:
+                detail = detail.split(sep, 1)[0]
+                break
+        detail = detail[:160]
+        return JSONResponse(status_code=503,
+                            content={"detail": detail, "code": "TTS_UNAVAILABLE"})
     if not audio:
         log.warning("tts 返回空音频  ｜%s", (req.text or "")[:24])
-        return JSONResponse(status_code=503, content={"detail": "TTS_UNAVAILABLE"})
+        return JSONResponse(status_code=503,
+                            content={"detail": "合成返回空音频", "code": "TTS_UNAVAILABLE"})
     log.info(
         "转发合成  %s 字 → %d KB / %.1f 秒 / %s  ｜%s",
         len(req.text or ""), len(audio) // 1024,
@@ -388,10 +397,13 @@ def health() -> dict:
         pass
 
     tts_mode, tts_up, tts_url = "inproc", False, "inproc://tts"
+    tts_detail, tts_backend = "", ""
     try:
         info = tts.status()
         tts_mode = str(info.get("mode") or tts_mode)
         tts_up = bool(info.get("up"))
+        tts_detail = str(info.get("detail") or "")
+        tts_backend = str(info.get("backend") or "")
         tts_url = "inproc://tts" if tts_mode != "http" else (
             str(info.get("endpoint") or "") or settings.TTS_BASE)
     except Exception:
@@ -432,7 +444,8 @@ def health() -> dict:
         "asr": "sherpa-onnx-sensevoice" if asr_ready else "off",
         "asr_service": {"up": asr_up, "ready": asr_ready, "url": asr_url},
         "tts": tts_mode,
-        "tts_service": {"up": tts_up, "url": tts_url},
+        "tts_service": {"up": tts_up, "url": tts_url,
+                        "detail": tts_detail, "backend": tts_backend},
         "memory": "sqlite",
         "gpu": {"available": gpu_avail},
         "db": _db_ok(),
