@@ -783,6 +783,29 @@ def _port_open(port: int) -> bool:
         return False
 
 
+def _inproc_ready(code: str) -> bool:
+    """进程内模块的真实就绪度——与 /health 同一判定源（judge.engine_status / tts.status），
+    不另造一套判断。异常一律按未就绪，绝不冒充可用。"""
+    try:
+        if code == "judge":
+            from brain.services.judge import engine_status
+
+            st = engine_status()
+            eff = str(st.get("effective") or "rule")
+            if eff == "http":
+                return bool((st.get("remote") or {}).get("up"))
+            if eff == "onnx":
+                return bool(st.get("model")) or bool(st.get("model_path"))
+            return True
+        if code == "tts":
+            from brain.services import tts as tts_svc
+
+            return bool(tts_svc.status().get("up"))
+    except Exception:
+        return False
+    return False
+
+
 def _tail_lines(path: Any, limit: int) -> list[str]:
     """读最后 limit 行；文件大就只读尾部，第一行可能被截断，丢掉。"""
     size = path.stat().st_size
@@ -807,13 +830,21 @@ def list_logs(service: str = Query(default="", description="留空=只列清单�
     items: list[dict[str, Any]] = []
     for code, name, port, inproc in _LOG_SERVICES:
         path = _log_file(name)
+        if inproc:
+            # running 只表示「进程内模块在」；就绪度另取同源判定，文案不暗示可用。
+            ready = _inproc_ready(code)
+            status = "进程内 · 已就绪" if ready else "进程内 · 模型未就绪"
+            running = True
+        else:
+            running = _port_open(port)
+            status = "已启动" if running else "未启动"
         info: dict[str, Any] = {
             "key": code,
             "name": name,
             "port": None if inproc else port,
             "inproc": inproc,
-            "running": True if inproc else _port_open(port),
-            "status": "进程内" if inproc else ("已启动" if _port_open(port) else "未启动"),
+            "running": running,
+            "status": status,
             "file": str(path) if path else "",
             "size": path.stat().st_size if path else 0,
             "mtime": "",
