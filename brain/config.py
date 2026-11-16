@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+log = logging.getLogger("brain.config")
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -200,5 +203,6 @@ def write_web_config() -> None:
             "window.COMPANION_LOCAL = " + json.dumps(payload, ensure_ascii=False) + ";\n",
             encoding="utf-8",
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.error("config.local.js 写入失败：%s", type(exc).__name__, exc)
+        print(f"  [警告] config.local.js 未生成，前端将用兜底端口（{type(exc).__name__}: {exc}）")

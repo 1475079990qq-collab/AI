@@ -55,6 +55,17 @@ def test(code: str) -> dict:
     if int(p.get("enabled", 1)) == 0 or mode.lower() == "off":
         return _result(False, mode, "该服务已在控制台停用（运行方式=已关闭）", started)
 
+    # TTS 进程内引擎：查本进程引擎状态，不再去探独立 :8102。
+    if code == "tts" and mode.lower() == "inproc":
+        try:
+            from brain.services import tts as tts_svc
+
+            info = tts_svc.status(force=True)
+            return _result(bool(info.get("up")), "inproc",
+                            str(info.get("detail") or info.get("endpoint") or "进程内引擎"), started)
+        except Exception as exc:
+            return _result(False, "inproc", f"进程内引擎不可用：{type(exc).__name__}: {exc}", started)
+
     try:
         if code in ("llm", "llm_alt", "embedding", "tts", "asr"):
             url = str(cfg.get("base_url") or "")

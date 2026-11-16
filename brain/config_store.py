@@ -189,7 +189,7 @@ PROVIDER_DEFAULTS["llm_alt"] = {f["key"]: f["default"] for f in PROVIDER_FIELDS[
 
 PROVIDER_MODES: dict[str, str] = {
     "llm": "http", "llm_alt": "off", "embedding": "off", "judge": "rule",
-    "asr": "http", "tts": "http", "knowledge": "off",
+    "asr": "http", "tts": "inproc", "knowledge": "off",
 }
 
 # 每个 provider 允许的「运行方式」：控制台下拉框只列说得通的选项。
@@ -200,7 +200,7 @@ PROVIDER_MODE_OPTIONS: dict[str, list[str]] = {
     "embedding": ["http", "off"],
     "judge":     ["http", "onnx", "rule", "off"],
     "asr":       ["http", "off"],
-    "tts":       ["http", "off"],
+    "tts":       ["inproc", "http", "off"],
     "knowledge": ["mcp_http", "webhook", "off"],
 }
 
@@ -584,6 +584,9 @@ def update_provider(code: str, patch: dict[str, Any], enabled: int | None = None
         coerced = _coerce(field_map[key], value)
         config[key] = coerced
         changed[key] = coerced
+    # 列 mode 与内层 config.mode 是同一事实：写列时同步进内层，避免两处漂移。
+    if mode is not None:
+        config["mode"] = mode
     conn = db.connect()
     try:
         conn.execute(

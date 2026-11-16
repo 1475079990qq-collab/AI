@@ -93,6 +93,24 @@ def _cfg() -> dict:
         return dict(config_store.PROVIDER_DEFAULTS.get("knowledge", {}))
 
 
+def _row() -> dict:
+    """读 providers 列（enabled/mode）——开关权威源；内层 config.mode 只是影子。"""
+    try:
+        return dict(providers.get("knowledge") or {})
+    except Exception:
+        return {}
+
+
+def _disabled(row: dict) -> bool:
+    """列 enabled=0 或 mode=off 即停用：不读内层 config.mode、不外呼 MCP。"""
+    try:
+        if int(row.get("enabled", 1)) == 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(row.get("mode") or "off").strip().lower() == "off"
+
+
 def _str(v) -> str:
     return "" if v is None else str(v)
 
@@ -340,6 +358,10 @@ def search(query: str, top_k: int | None = None, fast: bool = False) -> dict:
     fast=False 用于控制台「检索测试」：同步等完整结果（用户主动发起），并预热缓存。
     """
     started = time.perf_counter()
+    if _disabled(_row()):
+        return {"results": [], "mode": "off", "degraded": True,
+                "cached": False, "pending": False,
+                "latency_ms": round((time.perf_counter() - started) * 1000.0, 2)}
     cfg = _cfg()
     mode = _str(cfg.get("mode") or "off").lower()
     degraded = False
@@ -405,6 +427,8 @@ def _known_bases(cfg: dict) -> list[dict]:
 
 
 def list_bases() -> dict:
+    if _disabled(_row()):
+        return {"bases": [], "mode": "off", "degraded": True}
     cfg = _cfg()
     mode = _str(cfg.get("mode") or "off").lower()
     degraded = False

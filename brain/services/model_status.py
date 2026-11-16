@@ -92,6 +92,16 @@ def tts_base() -> str:
 
 
 def asr_base() -> str:
+    # 与 LLM 对齐：优先 providers.asr 卡的 base_url，空才落 settings.ASR_BASE 兜底。
+    try:
+        from brain import config_store
+
+        cfg = config_store.get_provider("asr").get("config") or {}
+        v = str(cfg.get("base_url") or "").rstrip("/")
+        if v:
+            return v
+    except Exception:
+        pass
     return str(settings.ASR_BASE or "").rstrip("/")
 
 
