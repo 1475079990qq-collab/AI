@@ -19,12 +19,11 @@ from typing import Any
 from . import db
 from .schemas import EMOTION_LABELS
 
-PROVIDER_CODES: tuple[str, ...] = ("llm", "llm_alt", "embedding", "judge", "asr", "tts", "knowledge")
+PROVIDER_CODES: tuple[str, ...] = ("llm", "llm_alt", "judge", "asr", "tts", "knowledge")
 
 PROVIDER_NAMES: dict[str, str] = {
     "llm": "对话大模型",
     "llm_alt": "本地 4B 模型（备用）",
-    "embedding": "文本向量",
     "judge": "情感判断模型",
     "asr": "语音识别",
     "tts": "语音合成",
@@ -74,17 +73,6 @@ PROVIDER_FIELDS: dict[str, list[dict[str, Any]]] = {
         F("max_tokens", "最大生成", "number", 512, "", minimum=32, maximum=4096),
         F("stream", "流式输出", "bool", True, "关闭则一次性返回"),
         F("force_gpu", "强制全部放显卡", "bool", True, "开=显存放不下就直接报错，不偷偷退回 CPU"),
-    ],
-    "embedding": [
-        F("base_url", "服务地址", "text", "http://127.0.0.1:11434",
-          "外部共享的向量服务（你的第二大脑/知识库也在用），本程序只调用、不单独拉起、不另建索引"),
-        F("api_key", "密钥", "text", "", "", secret=True),
-        F("model", "模型", "text", "bge-m3", "中文语义检索；换模型后要重建索引，没索引时本程序退回字面召回"),
-        F("dimension", "向量维度", "number", 1024,
-          "必须和外部那套索引一致（bge-m3=1024）；本程序自己不留第二份向量", minimum=64, maximum=4096),
-        F("force_cpu", "只跑 CPU", "bool", True, "把显存留给对话模型和语音"),
-        F("timeout_s", "超时(秒)", "number", 10, "", minimum=1, maximum=120),
-        F("normalize", "归一化", "bool", True, ""),
     ],
     "judge": [
         F("engine", "判断引擎", "select", "http",
@@ -190,7 +178,7 @@ PROVIDER_FIELDS["llm_alt"] = [
 PROVIDER_DEFAULTS["llm_alt"] = {f["key"]: f["default"] for f in PROVIDER_FIELDS["llm_alt"]}
 
 PROVIDER_MODES: dict[str, str] = {
-    "llm": "http", "llm_alt": "off", "embedding": "off", "judge": "rule",
+    "llm": "http", "llm_alt": "off", "judge": "rule",
     "asr": "http", "tts": "inproc", "knowledge": "off",
 }
 
@@ -199,7 +187,6 @@ PROVIDER_MODES: dict[str, str] = {
 PROVIDER_MODE_OPTIONS: dict[str, list[str]] = {
     "llm":       ["http", "off"],
     "llm_alt":   ["http", "off"],
-    "embedding": ["http", "off"],
     "judge":     ["http", "onnx", "rule", "off"],
     "asr":       ["http", "off"],
     "tts":       ["inproc", "http", "off"],
@@ -352,16 +339,17 @@ def _init_store_once() -> None:
                 "INSERT OR IGNORE INTO runtime_params(key,value,updated_at) VALUES(?,?,?)",
                 (key, value, _now()),
             )
-        # 老库里存的是「语音识别 ASR」「向量 / Embedding」这类半中半英的名字，
-        # 统一成纯中文（只改这几个明确的老名字，不动用户自定义的）
+        # 老库里存的是「语音识别 ASR」这类半中半英的名字，统一成纯中文（只改这几个明确的老名字）
         for _code, _old, _new in (
             ("asr", "语音识别 ASR", "语音识别"),
             ("tts", "语音合成 TTS", "语音合成"),
-            ("embedding", "向量 / Embedding", "文本向量"),
         ):
             conn.execute(
                 "UPDATE providers SET name=? WHERE code=? AND name=?", (_new, _code, _old)
             )
+        # 程序里没有任何地方消费向量服务（记忆召回走 bigram），这张卡片没人用，
+        # 配置行一并清掉，避免留下一个「看着能配、其实什么都不影响」的假开关。
+        conn.execute("DELETE FROM providers WHERE code='embedding'")
         _migrate_judge_model(conn)
         _migrate_model_services(conn)
         conn.commit()
@@ -401,7 +389,7 @@ def _migrate_model_services(conn) -> None:
             conn.execute("UPDATE providers SET mode='http' WHERE mode IN ('mock','off')"
                          " AND code IN ('llm','asr','tts')")
             conn.execute("UPDATE providers SET mode='off' WHERE mode='mock'"
-                         " AND code IN ('embedding','knowledge')")
+                         " AND code IN ('knowledge')")
         except Exception:
             pass
 

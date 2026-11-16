@@ -67,7 +67,7 @@ def test(code: str) -> dict:
             return _result(False, "inproc", f"进程内引擎不可用：{type(exc).__name__}: {exc}", started)
 
     try:
-        if code in ("llm", "llm_alt", "embedding", "tts", "asr"):
+        if code in ("llm", "llm_alt", "tts", "asr"):
             url = str(cfg.get("base_url") or "")
             if not url:
                 return _result(False, mode, "未配置 base_url，无法探测", started)

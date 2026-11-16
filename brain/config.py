@@ -88,10 +88,8 @@ def _abs(value: str) -> str:
 class Settings:
     ROOT: Path
     DB_PATH: str
-    CHROMA_PATH: str
     OLLAMA_BASE: str
     LLM_MODEL: str
-    EMBED_MODEL: str
     TTS_BASE: str
     TTS_TIMEOUT: float
     TTS_HOST: str
@@ -140,10 +138,8 @@ _ASR_PORT = _i("ASR_PORT", 8103)
 settings = Settings(
     ROOT=ROOT,
     DB_PATH=_abs(_s("DB_PATH", "data/companion.db")),
-    CHROMA_PATH=_abs(_s("CHROMA_PATH", "data/chroma")),
     OLLAMA_BASE=_s("OLLAMA_BASE", "http://127.0.0.1:11434"),
     LLM_MODEL=_s("LLM_MODEL", "qwen3:8b"),
-    EMBED_MODEL=_s("EMBED_MODEL", "bge-m3"),
     TTS_BASE=_s("TTS_BASE", f"http://127.0.0.1:{_TTS_PORT}").rstrip("/"),
     TTS_TIMEOUT=_f("TTS_TIMEOUT", 60.0),
     TTS_HOST=_s("TTS_HOST", "0.0.0.0"),

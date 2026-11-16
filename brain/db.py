@@ -524,7 +524,7 @@ def _bigrams(text: str) -> set[str]:
 
 
 def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
-    """零依赖的中文 bigram 相似度兜底，Chroma 不可用时启用。"""
+    """零依赖的中文 bigram 相似度检索（本程序不做向量召回，只留这一条路）。"""
     conn = connect()
     try:
         rows = conn.execute(

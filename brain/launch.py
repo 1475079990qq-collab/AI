@@ -125,16 +125,6 @@ _MODEL_SERVICES = [
     },
 ]
 
-# 远端服务提醒：这些 provider 的 base_url 还指向本地 Ollama 但用户可能有远端。
-_REMOTE_HINTS = [
-    {
-        "code": "embedding",
-        "local_markers": ["127.0.0.1", "localhost", "11434"],
-        "message": "向量模型还指向本地 Ollama。如果你有远端向量服务，去控制台「模型服务」改 embedding 的 base_url",
-    },
-]
-
-
 def _get_provider_mode(code: str) -> str:
     """读 config_store 里 provider 的当前 mode（运行时配置，比 config.yaml 新）。"""
     try:
@@ -151,19 +141,6 @@ def _check_model_services() -> tuple[list[dict], list[str]]:
     """
     results = []
     hints = []
-
-    # ---- 远端配置提醒 ----
-    try:
-        p_emb = config_store.get_provider("embedding") or {}
-        cfg = p_emb.get("config", {}) if isinstance(p_emb, dict) else {}
-        emb_base = str(cfg.get("base_url") or "").strip().lower()
-        for h in _REMOTE_HINTS:
-            if emb_base:
-                is_local = any(m in emb_base for m in h["local_markers"])
-                if is_local and h["code"] == "embedding":
-                    hints.append(h["message"])
-    except Exception:
-        pass
 
     # ---- 模型服务检查 ----
     for svc in _MODEL_SERVICES:

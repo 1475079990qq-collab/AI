@@ -1,4 +1,8 @@
-"""事实记忆层：优先 chromadb，未安装 / 异常一律降级到 SQLite。
+"""事实记忆层：只走 SQLite（中文 bigram 相似度），不引入向量库。
+
+为什么不留向量这条路：本程序没有任何语义召回的需求场景，引一个向量库/向量模型
+只会多一套索引、多一份要和外部对齐的依赖。数据量到「字面召回明显失手」时再谈，
+那时也应该复用外部那套，而不是在这里再建一份。
 
 边界（重构后）：
 - 这里只管「关于这个人的记忆」：事实、每日摘要、未完成的事、画像、身份称呼。
@@ -11,13 +15,6 @@ from __future__ import annotations
 from brain import db
 from brain.config import settings
 from brain.schemas import new_request_id
-
-try:
-    import chromadb
-except ImportError:  # pragma: no cover - 取决于部署环境
-    chromadb = None  # type: ignore[assignment]
-
-_COLLECTION = "companion_facts"
 
 
 def _as_float(value, default: float) -> float:
@@ -47,29 +44,8 @@ def _runtime(top_k: int) -> tuple[float, int]:
     return min_intensity, max(1, eff_top_k)
 
 
-def _chroma_facts(user_id: str, query: str, top_k: int) -> list[dict]:
-    client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
-    coll = client.get_or_create_collection(_COLLECTION)
-    res = coll.query(query_texts=[query], n_results=top_k,
-                     where={"user_id": user_id})
-    ids = (res.get("ids") or [[]])[0]
-    docs = (res.get("documents") or [[]])[0]
-    dists = (res.get("distances") or [[]])[0]
-    facts: list[dict] = []
-    for i, doc in enumerate(docs):
-        fid = ids[i] if i < len(ids) else ""
-        dist = dists[i] if i < len(dists) else None
-        score = round(1.0 / (1.0 + float(dist)), 4) if dist is not None else 0.5
-        facts.append({"id": str(fid), "text": str(doc), "score": score})
-    return facts
-
-
 def _facts_only(user_id: str, query: str, top_k: int) -> tuple[list[dict], str]:
-    if chromadb is not None:
-        try:
-            return _chroma_facts(user_id, query, top_k), "chroma"
-        except Exception:
-            pass  # Chroma 异常 -> SQLite 兜底
+    """只走 SQLite 的字面召回：取最近 200 条事实，按两字重合打分。"""
     try:
         rows = db.search_facts(user_id, query, top_k)
         facts = [{"id": str(r["id"]), "text": str(r["text"]),
@@ -148,7 +124,7 @@ def store_fact(user_id: str, session_id: str, text: str,
     """把本轮事实文本落库；fact_ids 为调用方给定的标识 / 关联 id 列表。
 
     取首个 id 作主键，完整列表写入 metadata；为空时内部生成一个。
-    Chroma 可用时同步写一份，任何异常都吞掉并继续落 SQLite。
+    只落 SQLite：这里不再维护第二份向量副本。
     """
     ids = [str(x) for x in (fact_ids or []) if str(x).strip()]
     primary = ids[0] if ids else new_request_id()
@@ -157,17 +133,6 @@ def store_fact(user_id: str, session_id: str, text: str,
         "session_id": session_id,
         "related_fact_ids": ids,
     }
-    if chromadb is not None:
-        try:
-            client = chromadb.PersistentClient(path=settings.CHROMA_PATH)
-            coll = client.get_or_create_collection(_COLLECTION)
-            coll.upsert(
-                ids=[primary], documents=[text],
-                metadatas=[{"user_id": user_id, "session_id": session_id,
-                            "related_fact_ids": ",".join(ids)}],
-            )
-        except Exception:
-            pass
     try:
         db.add_fact(fact_id=primary, user_id=user_id, session_id=session_id,
                     text=text, metadata=metadata)

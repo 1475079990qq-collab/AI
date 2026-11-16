@@ -18,7 +18,6 @@
 # ---- 数据 ----
 数据:
   DB_PATH: data/companion.db
-  CHROMA_PATH: data/chroma
 
 # ---- 兜底值（仅在数据库里没有对应模型卡时才生效，正常不用碰）----
 兜底:
