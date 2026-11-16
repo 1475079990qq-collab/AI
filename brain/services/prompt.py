@@ -19,6 +19,7 @@ system 内容依次放入：
 from __future__ import annotations
 
 from brain.schemas import EmotionResult
+from brain.services import clock
 
 _OUTPUT_RULE = (
     "只输出你这个角色要说的话本身。\n"
@@ -98,6 +99,14 @@ def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
         if user_name:
             id_lines.append(f"- 对方叫「{user_name}」，可以直接叫他名字。")
         blocks.append("\n".join(id_lines))
+
+    # 0.5) 当天时间：硬事实，由后端按 Asia/Shanghai 注入，模型不许自己估。
+    blocks.append(
+        "【今天是哪天｜硬事实，与任何旧对话、记忆里的日期冲突时以本段为准】\n"
+        f"- 现在是 {clock.today_label()}。\n"
+        "- 被问到日期、星期、几号时只能按上面说；记不准就说「我记不太清具体日子」，"
+        "不要编年份、月份、日期或星期，也不要沿用记忆或旧对话里出现过的旧日期。"
+    )
 
     # 1) 人格模板
     blocks.append(str((persona or {}).get("system_prompt", "")).strip())

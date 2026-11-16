@@ -43,6 +43,7 @@ _RULE_LABELS = {
     "too_short", "wrong_self_name", "latency_over_4s", "latency_over_2s",
     "user_repeated_self", "empty_reply", "prompt_pollution", "after_error",
     "identity_not_in_prompt",
+    "date_mismatch",
 }
 
 # 规则 → 人话的「为什么」兜底（模型不可用时用，指到具体问题，不写规则名）。
@@ -57,6 +58,7 @@ _RULE_WHY = {    "repeat_head": "回复开头和上一轮几乎一字不差，�
     "prompt_pollution": "记忆里混进了摘要类的元文本，被顺带复述了出来。",
     "identity_not_in_prompt": "当前名字没进人格，嘴上容易说错称呼。",
     "after_error": "上一轮出错之后接着答，没先确认他现在等的是什么。",
+    "date_mismatch": "报出来的年月日或星期和当天对不上，等于把没把握的时间说成了事实。",
 }
 
 # 规则 → 中文提示（只给模型对照用；英文标签不进模型输入，避免它原样抄进复盘）。
@@ -75,6 +77,7 @@ _RULE_CN = {
     "prompt_pollution": "复述了记忆里的摘要元文本",
     "identity_not_in_prompt": "当前名字没进人格",
     "after_error": "出错之后接着答",
+    "date_mismatch": "说了和今天对不上的日期或星期",
 }
 
 # 通过轮次抽样计数：user_id → 已轮过的 pass 轮次。进程内有界，不写库。

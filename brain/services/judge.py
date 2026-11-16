@@ -22,6 +22,7 @@ import httpx
 from brain import db
 from brain.config import settings
 from brain.schemas import EMOTION_LABELS, EmotionResult, new_request_id
+from brain.services import clock
 
 try:
     from brain.services import providers
@@ -380,7 +381,11 @@ _CACHE_MAX = 256
 
 
 def _cache_key(text: str, history: list[dict], cfg: dict) -> str:
-    """键 = 原话 + 引擎/模型 + 最近两轮上下文；任一项变了就不复用旧判断。"""
+    """键 = 当天日期 + 原话 + 引擎/模型 + 最近两轮上下文；任一项变了就不复用旧判断。
+
+    日期必须进键：情感判断虽然主要看措辞，但同一句话跨天复用时，旧判断不该
+    被第二天继续复用；日期变了键自然变，配合 5 分钟 TTL 双保险。
+    """
     tail = ""
     try:
         tail = "|".join(
@@ -389,7 +394,7 @@ def _cache_key(text: str, history: list[dict], cfg: dict) -> str:
         )
     except Exception:
         tail = ""
-    return f"{text.strip()}|{cfg.get('engine')}|{cfg.get('model')}|{tail}"
+    return f"{clock.date_key()}|{text.strip()}|{cfg.get('engine')}|{cfg.get('model')}|{tail}"
 
 
 def _ctx_history(history: list[dict], cfg: dict) -> list[dict]:

@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import re
 
+from brain.services import clock
+
 # 括号旁白：整句以括号开头（「（语气轻松）…」），或句中出现 2-20 字的括号说明
 _NARRATION_RE = re.compile(r"^[（(]")
 _INLINE_NARRATION_RE = re.compile(r"[（(][^）)]{2,20}[）)]")
@@ -25,6 +27,42 @@ _POLLUTION = ("# Summary", "来源:mcp", "（来源:", "【摘要】", "# 【情
 
 # 历史残留的称呼：出现且与当前名字不同 → 自称错。
 _LEGACY_NAMES = ("小暖", "小智", "小助手")
+
+# 日期 / 星期：只抓「写出具体年月日或星期、且和当天对不上」的；
+# 「今天 / 明天 / 昨天 / 前天 / 后天」这类相对说法不含具体日期，不在这里拦。
+_YMD_RE = re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_ISO_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+_MD_RE = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号](?!\d)")
+_WEEK_RE = re.compile(r"星期([一二三四五六日天])|周([一二三四五六日天])|礼拜([一二三四五六日天])")
+_WEEK_MAP = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+
+
+def _date_mismatch(text: str) -> bool:
+    """回复里出现具体日期 / 星期且与当天（Asia/Shanghai）不符 → True。"""
+    body = str(text or "")
+    if not body:
+        return False
+    today = clock.now_shanghai()
+    try:
+        for m in _YMD_RE.finditer(body):
+            y, mo, d = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if (y, mo, d) != (today.year, today.month, today.day):
+                return True
+        for m in _ISO_DATE_RE.finditer(body):
+            y, mo, d = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if (y, mo, d) != (today.year, today.month, today.day):
+                return True
+        for m in _MD_RE.finditer(body):
+            mo, d = int(m.group(1)), int(m.group(2))
+            if (mo, d) != (today.month, today.day):
+                return True
+        for m in _WEEK_RE.finditer(body):
+            wd = _WEEK_MAP.get(next(g for g in m.groups() if g))
+            if wd is not None and wd != today.weekday():
+                return True
+    except Exception:
+        return False
+    return False
 
 _LATENCY_WARN_MS = 2200.0
 _LATENCY_FAIL_MS = 4000.0
@@ -78,6 +116,9 @@ def check_reply(*, reply: str, prev_reply: str = "", user_text: str = "",
                 rules.append("breaking_character")
                 break
 
+        if _date_mismatch(body):
+            rules.append("date_mismatch")
+
         a, b = _plain(body), _plain(prev_reply)
         if len(a) >= 12 and len(b) >= 12 and a[:12] == b[:12]:
             rules.append("repeat_head")
@@ -121,6 +162,7 @@ RULE_NOTES = {
     "prompt_pollution": "记忆里混进了摘要元文本：别复述这些，只挑一句他的原话。",
     "after_error": "上一轮出错后接着答：先确认他现在等的是什么，再答。",
     "identity_not_in_prompt": "人格里缺名字：把名字放回最前面。",
+    "date_mismatch": "日期说错了：拿不准就只说今天/明天/昨天，别报具体年月日和星期，更别编年份。",
 }
 
 
