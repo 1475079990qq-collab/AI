@@ -16,20 +16,26 @@
     --cool: #7aa8e8;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
     -webkit-font-smoothing: antialiased;
+    overflow: hidden;   /* 整页不出现纵向滚动；左栏内容多了只在栏内滚 */
   }
-  .wrap { max-width: 1560px; margin: 0 auto; padding: 22px 26px 34px; }
-  .head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-  .head h1 { margin: 0; font-size: 20px; letter-spacing: .5px; font-weight: 650; }
-  .head .sub { color: var(--muted); font-size: 12.5px; }
-  .head .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .wrap {
+    height: 100%; max-width: 1560px; margin: 0 auto; padding: 16px 22px 12px;
+    display: flex; flex-direction: column; min-height: 0; gap: 12px;
+  }
+
+  .head { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; min-height: 34px; }
+  .head h1 { margin: 0; font-size: 19px; letter-spacing: .5px; font-weight: 650; white-space: nowrap; }
+  .head .sub { color: var(--muted); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .head .right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; }
   .pill {
     border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px;
     font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
-    background: rgba(255,255,255,.02);
+    background: rgba(255,255,255,.02); white-space: nowrap;
   }
   .pill b { color: var(--ink); font-weight: 600; }
   .pill-btn { cursor: pointer; color: var(--ink); font: inherit; font-size: 12px; }
@@ -38,36 +44,58 @@
   .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #6b7478; }
   .dot.on { background: var(--accent); box-shadow: 0 0 10px rgba(95,208,180,.8); }
   .dot.err { background: #e07a72; box-shadow: 0 0 10px rgba(224,122,114,.7); }
-  a.back { color: var(--muted); text-decoration: none; font-size: 12.5px; }
+  a.back { color: var(--muted); text-decoration: none; font-size: 12.5px; white-space: nowrap; }
   a.back:hover { color: var(--ink); }
 
-  .layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px; margin-top: 18px; }
+  .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 288px minmax(0, 1fr); gap: 12px; }
+  .left { min-height: 0; display: flex; flex-direction: column; gap: 8px; overflow-y: auto; overflow-x: hidden; }
   .panel {
     background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
-    overflow: hidden;
   }
-  .stage { position: relative; }
-  #atlas { display: block; width: 100%; height: min(76vh, 820px); }
-  .legend { padding: 14px 16px 18px; }
-  .legend .t { font-size: 12px; letter-spacing: .6px; color: var(--muted); text-transform: uppercase; }
+  .stage { position: relative; min-height: 0; overflow: hidden; }
+  #atlas { display: block; width: 100%; height: 100%; }
+
+  .legend { padding: 10px 14px 8px; }
+  .legend .t, .feed .t, .lessons .t {
+    font-size: 11.5px; letter-spacing: .6px; color: var(--muted); text-transform: uppercase;
+  }
   .row {
-    display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: start;
-    padding: 9px 0; border-bottom: 1px dashed rgba(255,255,255,.07);
+    display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 8px; align-items: start;
+    padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,.07);
   }
   .row:last-child { border-bottom: 0; }
   .row .sw { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; }
-  .row .nm { font-size: 12.5px; }
-  .row .val { font-size: 11.5px; color: var(--muted); text-align: right; max-width: 130px;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .row .main { min-width: 0; }
+  .row .line1 { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .row .nm { font-size: 11.5px; }
+  .row .val {
+    font-size: 10.5px; color: var(--muted); text-align: right; min-width: 0;
+    overflow-wrap: anywhere; font-variant-numeric: tabular-nums;
+  }
+  /* 说明文字按词整体换行，不在中文/「上限 300」中间硬折 */
+  .row .hint {
+    margin-top: 1px; font-size: 10px; color: #6e797d; line-height: 1.4;
+    word-break: keep-all; overflow-wrap: normal;
+  }
   .row.idle .nm { color: #6e797d; }
-  .where { margin-top: 12px; font-size: 11.5px; color: #6e797d; line-height: 1.7; }
+  .where { margin-top: 6px; font-size: 10px; color: #6e797d; line-height: 1.5; }
   .where code { color: #93a0a4; }
 
-  .feed { margin-top: 18px; padding: 12px 16px 14px; font-size: 12px; color: var(--muted); }
-  .feed .line { padding: 4px 0; font-variant-numeric: tabular-nums; }
-  .feed .k { color: #93a0a4; display: inline-block; min-width: 78px; }
+  .feed { padding: 10px 14px 8px; flex: 0 0 auto; }
+  .feed .line { display: flex; gap: 8px; padding: 1px 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .feed .k { color: #93a0a4; flex: 0 0 56px; }
+  .feed .region { color: #93a0a4; flex: 0 0 54px; }
   .feed .line b { color: var(--ink); font-weight: 600; }
-  .foot { margin-top: 16px; color: #5f696d; font-size: 11.5px; line-height: 1.75; }
+
+  .lessons { padding: 10px 14px 8px; }
+  .lesson-item { padding: 5px 0; border-bottom: 1px dashed rgba(255,255,255,.07); }
+  .lesson-item:last-child { border-bottom: 0; }
+  .lesson-meta { display: flex; gap: 10px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lesson-kind { color: #b49ae0; }
+  .lesson-note { margin-top: 2px; font-size: 10.5px; color: var(--ink); line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .lesson-empty { font-size: 11px; color: #6e797d; padding: 5px 0; }
+
+  .foot { flex: 0 0 auto; color: #5f696d; font-size: 10px; line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -87,19 +115,21 @@
   </div>
 
   <div class="layout">
-    <div>
+    <div class="left">
       <div class="panel legend" id="legend">
         <div class="t">九个脑区 · <span id="legend-count">0</span> 个神经元</div>
         <div id="legend-rows"></div>
         <div class="where">
-          <span id="fact-load">读取事实中…</span><br>
-          数据源 <code>/api/admin/live/stream</code>（SSE）。<br>
-          断线自动重连；15 秒无事件只发心跳。
+          <span id="fact-load">读取事实中…</span> · SSE 实时推送，断线自动重连。
         </div>
       </div>
       <div class="panel feed">
-        <div class="t" style="font-size:11.5px;letter-spacing:.6px;color:#8b979b">最近事件</div>
+        <div class="t">最近事件</div>
         <div id="feed-lines"></div>
+      </div>
+      <div class="panel lessons">
+        <div class="t">他自己想的</div>
+        <div id="lesson-list"><div class="lesson-empty">读取中…</div></div>
       </div>
     </div>
     <div class="panel stage">
@@ -111,9 +141,71 @@
     位置 = 固定的脑形编组（听见 → 判断 → 记忆 → 提示词 → 工具 → 思考 → 出字 → 声音 → 收尾），不随数据乱跑。<br>
     放电量来自真实量级：情绪强度、事实条数、上下文字数、已出字数、语音 KB；停下来后按真实时刻留余辉，不凭空造脉冲。<br>
     记忆不是整片一起亮：先点亮这轮真正召回的那几条事实，再顺着「共享两字词」的联想带出一串；想起过的事余温更久（约 5 秒），其余约 1.9 秒。按「定格」可停住衰减，数清刚亮了哪一片。<br>
-    说完之后还会自己复盘（收尾区那组事件）：发现复读、旁白、太长、串味，就写成一条「下次怎么改」，下一轮进提示词。`think_draft=1` 时先在心里过一句再说（每轮多 3~4 秒，默认关）。
+    说完之后还会自己复盘（收尾区那组事件）：发现复读、旁白、太长、串味，就写成一条「下次怎么改」，下一轮进提示词。
   </div>
 </div>
+
+<script src="brain-growth.js"></script>
 <script src="brain.js"></script>
+<script>
+/* 「他自己想的」：把它复盘写下的原话如实摆出来，不改写、不补编。 */
+(function () {
+  'use strict';
+  var box = document.getElementById('lesson-list');
+  if (!box) return;
+
+  function adminToken() {
+    try { return localStorage.getItem('companion.admin_token') || ''; } catch (e) { return ''; }
+  }
+  function relativeTime(iso) {
+    if (!iso) return '';
+    var t = new Date(String(iso).replace(' ', 'T')).getTime();
+    if (!t || isNaN(t)) return String(iso);
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return s + ' 秒前';
+    if (s < 3600) return Math.floor(s / 60) + ' 分前';
+    if (s < 86400) return Math.floor(s / 3600) + ' 时前';
+    var d = new Date(t);
+    return ('0' + (d.getMonth() + 1)).slice(-2) + '-' + ('0' + d.getDate()).slice(-2) + ' ' +
+      ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+  function showEmpty(text) {
+    box.innerHTML = '';
+    var e = document.createElement('div');
+    e.className = 'lesson-empty';
+    e.textContent = text;
+    box.appendChild(e);
+  }
+  function render(items) {
+    box.innerHTML = '';
+    if (!items || !items.length) { showEmpty('还没有复盘'); return; }
+    items.forEach(function (it) {
+      var row = document.createElement('div');
+      row.className = 'lesson-item';
+      var meta = document.createElement('div');
+      meta.className = 'lesson-meta';
+      var when = document.createElement('span');
+      when.textContent = relativeTime(it.created_at);
+      var kind = document.createElement('span');
+      kind.className = 'lesson-kind';
+      kind.textContent = it.kind || '复盘';
+      meta.appendChild(when);
+      meta.appendChild(kind);
+      var note = document.createElement('div');
+      note.className = 'lesson-note';
+      note.textContent = String(it.note || '');
+      row.appendChild(meta);
+      row.appendChild(note);
+      box.appendChild(row);
+    });
+  }
+  fetch('/api/admin/lessons?limit=5', {
+    headers: adminToken() ? { 'X-Admin-Token': adminToken() } : {}
+  })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { render(d.items || []); })
+    .catch(function () { showEmpty('复盘暂时读不到'); });
+})();
+</script>
 </body>
 </html>
