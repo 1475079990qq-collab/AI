@@ -11,3 +11,5 @@ __pycache__/
 _s_*.png
 _shot_*.png
 _run.txt
+# 启动时由 brain/config.py write_web_config() 生成的产物，端口以 config.yaml 为准，不进版本库
+web/config.local.js
