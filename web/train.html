@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>训练中心 · 口吻</title>
+<style>
+  :root{
+    --paper:#f7f4ee; --ink:#1f1c19; --muted:#6c655d; --line:#e2dbd0;
+    --accent:#8a5a3b; --ok:#3f6b4a; --warn:#9a6a1f; --bad:#8c3b32;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font-family:"Noto Serif CJK SC","Songti SC",Georgia,serif;line-height:1.6}
+  header{padding:26px 22px 14px;border-bottom:1px solid var(--line)}
+  header h1{margin:0;font-size:22px;font-weight:600;letter-spacing:.04em}
+  header p{margin:6px 0 0;color:var(--muted);font-size:13px}
+  main{padding:18px 22px 60px;max-width:940px}
+  section{margin:0 0 22px}
+  h2{font-size:13px;font-weight:600;letter-spacing:.08em;color:var(--muted);
+     margin:0 0 10px}
+  .card{background:#fffdf9;border:1px solid var(--line);border-radius:8px;padding:14px 16px}
+  .rows{display:grid;grid-template-columns:130px 1fr;gap:6px 14px;font-size:13.5px}
+  .rows .k{color:var(--muted)}
+  .tag{display:inline-block;padding:1px 7px;border-radius:4px;font-size:12px;
+       font-family:ui-monospace,monospace}
+  .tag.ok{background:#e8f0e9;color:var(--ok)}
+  .tag.bad{background:#f6e5e2;color:var(--bad)}
+  .tag.warn{background:#f8efdc;color:var(--warn)}
+  .opt{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .opt:last-child{border-bottom:0}
+  .opt .grow{flex:1}
+  .opt b{font-weight:600;font-size:14px}
+  .opt small{display:block;color:var(--muted);font-size:12.5px}
+  .opt code{font-family:ui-monospace,monospace;font-size:12px;color:var(--muted);
+            word-break:break-all;display:block;margin-top:4px}
+  button{font-family:inherit;font-size:13px;padding:6px 14px;border-radius:6px;
+         border:1px solid var(--line);background:#fff;cursor:pointer;color:var(--ink)}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+  button.primary:hover{background:var(--accent);border-color:var(--accent);color:#fff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  label.f{display:block;font-size:13px;color:var(--muted);margin:0 0 4px}
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  input[type=text],input[type=number],select{
+    width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;
+    background:#fff;font-family:ui-monospace,monospace;font-size:13px;color:var(--ink)}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+  .log{background:#221f1c;color:#e9e2d6;border-radius:8px;padding:12px 14px;
+       font-family:ui-monospace,monospace;font-size:12.5px;height:260px;overflow:auto;
+       white-space:pre-wrap;word-break:break-all}
+  .hint{font-size:12.5px;color:var(--muted);margin:8px 0 0}
+  .jobline{font-size:13px;margin:0 0 8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>训练中心 · 口吻</h1>
+  <p>只摆事实和按钮：装什么、用哪个底座、训几轮，都由你自己选。</p>
+</header>
+<main>
+  <section>
+    <h2>环境</h2>
+    <div class="card"><div class="rows" id="envRows"></div></div>
+  </section>
+
+  <section>
+    <h2>可选动作（点哪个就只做哪个）</h2>
+    <div class="card" id="options"></div>
+  </section>
+
+  <section>
+    <h2>训练配置</h2>
+    <div class="card">
+      <label class="f" for="baseModel">底座（HF 原版权重目录，GGUF 不能训）</label>
+      <select id="baseModel"></select>
+      <p class="hint">列表里没有可选项，说明本机还没有 HF 权重；需要你先准备好目录再回来。</p>
+      <div class="grid" style="margin-top:12px">
+        <div>
+          <label class="f" for="epochs">训练轮数</label>
+          <input id="epochs" type="number" value="3" step="0.5" min="1" max="10">
+        </div>
+        <div>
+          <label class="f" for="rank">LoRA rank</label>
+          <input id="rank" type="number" value="16" step="1" min="4" max="64">
+        </div>
+      </div>
+      <div style="margin-top:12px;font-size:13.5px">
+        <label><input type="checkbox" id="qlora"> 用 4bit QLoRA（显存更紧时选；P104 上可能不稳）</label><br>
+        <label><input type="checkbox" id="merge" checked> 训完合并权重（转 GGUF 要用）</label>
+      </div>
+      <div class="actions">
+        <button id="btnDataset">准备训练集</button>
+        <button id="btnTrain" class="primary">开始训练</button>
+        <button id="btnStop">停止</button>
+        <button id="btnRefresh">刷新</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>日志</h2>
+    <div class="card">
+      <p class="jobline" id="jobLine">当前没有任务</p>
+      <div class="log" id="log">—</div>
+    </div>
+  </section>
+</main>
+<script src="train.js"></script>
+</body>
+</html>

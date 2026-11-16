@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from brain import config_store, db
 from brain.config import settings
-from brain.routers import admin, chat, update
+from brain.routers import admin, chat, train, update
 
 # 主动开口的节流间隔：每 10 分钟看一次，该说才说（服务内部还有 3 小时/每天两次的限制）
 _PROACTIVE_INTERVAL_S = 600
@@ -80,6 +80,8 @@ app.include_router(chat.router)
 app.include_router(update.router)
 # 控制面（/api/admin/*）—— 已并入本进程，不再单独起 :8001
 app.include_router(admin.router)
+# 训练中心（/api/train/* + /train.html）—— 装什么、训什么由页面上自己点
+app.include_router(train.router)
 
 
 @app.get("/")
