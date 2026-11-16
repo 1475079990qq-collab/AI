@@ -212,6 +212,7 @@ RUNTIME_RULES: dict[str, dict[str, Any]] = {
     "reflect_enabled":       {"min": 0, "max": 1, "type": "int", "desc": "1=说完后后台自我复盘（不进回复链路，不拖慢开口）"},
     "reflect_sample_n":      {"min": 1, "max": 20, "type": "int", "desc": "自检通过的轮次每 N 轮抽样复盘一次"},
     "reflect_timeout_s":     {"min": 1, "max": 15, "type": "int", "desc": "复盘模型单次超时(秒)，超时自动降级规则级"},
+    "reflect_chat_wait_s":   {"min": 0, "max": 10, "type": "int", "desc": "复盘前最多等对话空闲的秒数，等不到就跳过本轮反思"},
     "reflect_base_url":      {"type": "text", "desc": "复盘模型地址（留空=跟随对话大模型卡；仅本地）"},
     "reflect_model":         {"type": "text", "desc": "复盘型号（留空=跟随对话大模型卡）"},
 }

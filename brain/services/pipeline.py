@@ -283,11 +283,29 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
             busy = user_id in _reflect_busy
             want_reflect = (not busy) and reflect_svc.should_reflect(
                 runtime, verdict2, rules2, user_id)
+            skipped = False
+            skip_reason = ""
+            try:
+                wait_s = max(0.0, min(10.0, float(runtime.get("reflect_chat_wait_s") or 3)))
+            except (TypeError, ValueError):
+                wait_s = 3.0
             if want_reflect:
                 _reflect_busy.add(user_id)
             try:
                 if want_reflect:
-                    reflect_payload = reflect_svc.run(ctx, runtime)
+                    # 先看有没有 /chat 正在说：有人在聊就最多等 wait_s 秒，
+                    # 等不到就跳过本轮反思——宁可少复盘一轮，也不拖正在开口的话。
+                    from brain.services import chat_gate
+                    if not chat_gate.wait_idle(wait_s):
+                        skipped = True
+                        skip_reason = "对话进行中"
+                        reflect_payload = {
+                            "kind": "", "verdict": verdict2, "why": "", "how": "",
+                            "note": "", "source": "skipped", "confidence": 0.0,
+                            "degrade_reason": skip_reason, "ms": 0.0, "used_model": "",
+                        }
+                    else:
+                        reflect_payload = reflect_svc.run(ctx, runtime)
                 else:
                     # 开关关 / 抽样没中 / 单飞重叠：保留旧的规则级记录路径。
                     kind, note = _checks.note_for(rules2)
@@ -311,7 +329,7 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
             how = str(reflect_payload.get("how") or "")
             # fail/warn 必落库；pass 抽样复盘只有模型给出了具体改法才记一条，
             # 规则兜底的空泛结论不刷条数。
-            should_store = bool(kind and note) and (
+            should_store = (not skipped) and bool(kind and note) and (
                 verdict2 in ("fail", "warn")
                 or (verdict2 == "pass" and reflect_payload.get("source") == "model" and how)
             )
@@ -326,7 +344,7 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
                 stored = True
             live.emit(
                 "ruminate_done", request_id=request_id, verdict=verdict2, rule=kind,
-                stored=stored,
+                stored=stored, skipped=skipped, skip_reason=skip_reason,
                 ms=round((time.perf_counter() - _t_ru) * 1000.0, 1),
                 why=why, how=how, source=reflect_payload.get("source"),
                 confidence=reflect_payload.get("confidence"),

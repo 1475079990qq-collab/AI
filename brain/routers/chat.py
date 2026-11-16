@@ -159,6 +159,9 @@ async def chat(req: ChatRequest) -> StreamingResponse:
                 yield _err_frame("BUSY", "服务正忙，请稍后再试", request_id)
                 return
             await _gate.acquire()
+            # 对话进行中标记：后台反思据此避开，不抢正在说的话（单向，不反向等反思）
+            from brain.services import chat_gate
+            chat_gate.enter_chat()
         started = time.perf_counter()
         try:
             try:
@@ -192,6 +195,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
             yield _err_frame("LLM_STREAM_FAILED", str(exc), request_id)
         finally:
             if need_gate:
+                from brain.services import chat_gate
+                chat_gate.leave_chat()
                 _gate.release()
 
     return StreamingResponse(body(), media_type="text/event-stream", headers=_SSE_HEADERS)
