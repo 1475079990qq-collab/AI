@@ -143,5 +143,10 @@ def store_fact(user_id: str, session_id: str, text: str,
     try:
         db.add_fact(fact_id=primary, user_id=user_id, session_id=session_id,
                     text=text, metadata=metadata)
+        try:
+            from brain.services import live
+            live.emit("fact_saved", fact_text=str(text or "").strip()[:14])
+        except Exception:
+            pass
     except Exception:
         pass

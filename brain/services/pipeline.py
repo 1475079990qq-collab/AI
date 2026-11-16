@@ -157,6 +157,21 @@ def _same_head(a: str, b: str, n: int = _HEAD_LEN) -> bool:
     return len(pa) >= n and pa[:n] == pb[:n]
 
 
+def _shared_terms(facts: list[dict], limit: int = 3) -> list[str]:
+    """从本轮召回事实的共享两字词里取联想词；取不到返回空数组。"""
+    try:
+        gram_sets: list[set[str]] = []
+        for f in facts or []:
+            t = str((f or {}).get("text") or "")
+            gram_sets.append({t[i:i + 2] for i in range(len(t) - 1)})
+        if len(gram_sets) < 2:
+            return []
+        common = set.intersection(*gram_sets)
+        return sorted(common)[:limit]
+    except Exception:
+        return []
+
+
 def _schedule_remember(user_text: str, emotion_label: str,
                        user_id: str, session_id: str) -> None:
     """流结束后后台沉淀：把「用户说的话」写成长期记忆，绝不阻塞 SSE。
@@ -333,7 +348,8 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
 async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIterator[TurnEvent]:
     started = time.perf_counter()
     request_id = req.request_id or new_request_id()
-    live.emit("turn_start", request_id=request_id, text_len=len(req.text or ""))
+    live.emit("turn_start", request_id=request_id, text_len=len(req.text or ""),
+              text=str(req.text or "").strip()[:12])
     event_id: int | None = None
     turn_id: int | None = None
     stage = "judge"
@@ -497,6 +513,8 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                           for tag in ("词重合", "最近说过", "带情绪")},
                   # 这一轮到底「想起了哪几条」：脑图据此点亮对应的神经元，并带出联想
                   ids=[str(f.get("id")) for f in (bundle.get("facts") or []) if f.get("id")][:6],
+                  fact_text=str((bundle.get("facts") or [{}])[0].get("text") or "").strip()[:14],
+                  linked=_shared_terms(bundle.get("facts") or []),
                   ms=round((time.perf_counter() - _t_mem) * 1000.0, 1))
 
         # ---- 5) 组装 prompt（请求级快照）----
@@ -566,7 +584,8 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # 绝不会 cancel 正在产出 token 的生成器 / httpx 流。
         stage = "llm"
         agen = llm.stream(messages, effective_params)
-        live.emit("llm_start", messages=len(messages))
+        # 这一轮没有独立的「意图/计划」结构，intent 留空，前端走兜底文案，不硬造。
+        live.emit("llm_start", messages=len(messages), intent="")
         queue: asyncio.Queue = asyncio.Queue()
         _END = object()
 
@@ -604,6 +623,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         _first_token = False
         _chars = 0
         _next_beat = 24
+        _recent = ""
 
         async def _restart() -> None:
             """开头雷同时中止本次生成，删掉可抄的旧回复再重来一次（只重试一次）。"""
@@ -643,13 +663,14 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                 continue
             if kind == "token":
                 _chars += len(str(payload))
+                _recent = (_recent + str(payload))[-10:]
                 if not _first_token:
                     _first_token = True
                     live.emit("first_token",
                               ms=round((time.perf_counter() - _t_llm) * 1000.0, 1))
                 if _chars >= _next_beat:
                     _next_beat = _chars + 24
-                    live.emit("tokens", chars=_chars)
+                    live.emit("tokens", chars=_chars, text=_recent)
                 if not head_checked:
                     head_buf.append(str(payload))
                     probe = "".join(head_buf)

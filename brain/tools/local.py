@@ -19,6 +19,11 @@ def remember(text: str, *, user_id: str) -> dict:
         fact_id=uuid.uuid4().hex, user_id=user_id, session_id="tool",
         text=body, metadata={"from": "tool:remember"},
     )
+    try:
+        from brain.services import live
+        live.emit("fact_saved", fact_text=body[:14])
+    except Exception:
+        pass
     return {"ok": True, "summary": f"已记下：{body}", "data": {"items": [{"snippet": body}]}}
 
 
