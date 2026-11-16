@@ -2,8 +2,6 @@
 (function () {
   "use strict";
 
-  var BASE = (window.location.port === "8000" || window.location.port === "")
-    ? "" : "";                        // 同源，直接打相对路径
   var timer = null;
 
   function el(id) { return document.getElementById(id); }

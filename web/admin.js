@@ -1005,20 +1005,45 @@
     if (!presetSel) return;
     var preset = PRESETS[presetSel.value];
     if (!preset) return;
-    if (!window.confirm('套用「' + preset.name + '」方案？只会改几个关键字段，已填的地址、口令、密钥都不会动。')) return;
     var btn = $('preset-apply');
     var hint = $('preset-hint');
+
+    // 先 GET 当前 provider 配置，弹窗里逐条写出「当前值 → 预设值」；用户取消则不写库。
+    var list;
+    try {
+      var data = await api('GET', '/api/admin/providers');
+      list = asList(data);
+      if (!list.length && data && Array.isArray(data.providers)) list = data.providers;
+    } catch (e) {
+      toast('读取当前配置失败：' + e.message, true);
+      return;
+    }
+    var curMap = {};
+    var keySets = {};
+    list.forEach(function (p) {
+      curMap[p.code] = (p.config && typeof p.config === 'object') ? p.config : {};
+      keySets[p.code] = (Array.isArray(p.fields) ? p.fields : []).map(function (f) { return f.key; });
+    });
+
+    var codes = Object.keys(preset.plan);
+    var overrideLines = [];
+    codes.forEach(function (code) {
+      var allowed = keySets[code];
+      var cur = curMap[code] || {};
+      Object.keys(preset.plan[code]).forEach(function (k) {
+        if (allowed && allowed.indexOf(k) < 0) return;
+        var oldV = cur[k] == null ? '（未设置）' : String(cur[k]);
+        overrideLines.push('· ' + code + '.' + k + '：' + oldV + ' → ' + String(preset.plan[code][k]));
+      });
+    });
+    var confirmMsg = '套用「' + preset.name + '」方案将覆盖以下当前配置：\n' +
+      overrideLines.join('\n') +
+      '\n\n口令、密钥不在此列，不会被覆盖；点「取消」则不写入任何配置。';
+    if (!window.confirm(confirmMsg)) return;
+
     if (btn) btn.disabled = true;
     if (hint) hint.textContent = '';
     try {
-      var data = await api('GET', '/api/admin/providers');
-      var list = asList(data);
-      if (!list.length && data && Array.isArray(data.providers)) list = data.providers;
-      var keySets = {};
-      list.forEach(function (p) {
-        keySets[p.code] = (Array.isArray(p.fields) ? p.fields : []).map(function (f) { return f.key; });
-      });
-      var codes = Object.keys(preset.plan);
       for (var i = 0; i < codes.length; i++) {
         var code = codes[i];
         var allowed = keySets[code];
@@ -1036,7 +1061,7 @@
     } catch (e) {
       toast('套用失败：' + e.message, true);
     } finally {
-      btn.disabled = false;
+      if (btn) btn.disabled = false;
     }
   }
 
