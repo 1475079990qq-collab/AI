@@ -27,6 +27,10 @@ _JOB: dict = {"name": "", "status": "idle", "started_at": 0.0, "ended_at": 0.0,
               "code": None, "cmd": ""}
 _PROC: subprocess.Popen | None = None
 
+# /status 每次都 import torch + 扫模型目录，重且重复：30 秒内复用同一份快照。
+_STATUS_CACHE: tuple[float, dict] | None = None
+_STATUS_TTL = 30.0
+
 
 # ---------------- 环境体检 ----------------
 
@@ -145,11 +149,16 @@ def install_options() -> list[dict]:
 
 
 def status() -> dict:
+    global _STATUS_CACHE
+    now = time.monotonic()
+    if _STATUS_CACHE is not None and now - _STATUS_CACHE[0] < _STATUS_TTL:
+        return dict(_STATUS_CACHE[1])
+
     deps = {name: _dep(name) for name in
             ("torch", "transformers", "peft", "accelerate", "datasets", "bitsandbytes")}
     data_dir = ROOT / "data" / "lora"
     samples = db.count_tone_samples()
-    return {
+    result = {
         "python": PY,
         "torch": _torch_state(),
         "deps": deps,
@@ -166,6 +175,8 @@ def status() -> dict:
         "options": install_options(),
         "job": job(),
     }
+    _STATUS_CACHE = (now, result)
+    return dict(result)
 
 
 # ---------------- 后台任务 ----------------

@@ -368,25 +368,32 @@ def health() -> dict:
     这样排查时一眼能看出是「服务没起」还是「起了但大脑没连上」。
     """
 
-    judge_mode, judge_up, judge_url = "rule", False, settings.JUDGE_BASE
+    judge_mode, judge_up, judge_url = "rule", False, "inproc://judge"
     try:
         from brain.services.judge import engine_status
 
         st = engine_status()
         judge_mode = str(st.get("effective") or "rule")
-        judge_up = bool((st.get("remote") or {}).get("up"))
-        judge_url = str(st.get("endpoint") or "") or settings.JUDGE_BASE
+        if judge_mode == "http":
+            judge_up = bool((st.get("remote") or {}).get("up"))
+            judge_url = str(st.get("endpoint") or "") or settings.JUDGE_BASE
+        elif judge_mode == "onnx":
+            judge_url = "inproc://judge"
+            judge_up = bool(st.get("model")) or bool(st.get("model_path"))
+        else:
+            # rule：关键词规则跑在本进程内，始终可用
+            judge_url = "inproc://judge"
+            judge_up = True
     except Exception:
         pass
 
-    tts_mode, tts_up, tts_url = "http", False, settings.TTS_BASE
+    tts_mode, tts_up, tts_url = "inproc", False, "inproc://tts"
     try:
-        from brain.services import tts as tts_service
-
-        info = tts_service.status()
+        info = tts.status()
         tts_mode = str(info.get("mode") or tts_mode)
         tts_up = bool(info.get("up"))
-        tts_url = str(info.get("endpoint") or "") or settings.TTS_BASE
+        tts_url = "inproc://tts" if tts_mode != "http" else (
+            str(info.get("endpoint") or "") or settings.TTS_BASE)
     except Exception:
         pass
 
@@ -399,9 +406,27 @@ def health() -> dict:
     except Exception:
         pass
 
+    llm_info: dict = {"up": False, "url": "", "fallback": True, "model": ""}
+    try:
+        from brain.services import model_status
+
+        llm_info = model_status.llm_service()
+    except Exception:
+        pass
+
+    # GPU 复用 /api/admin/gpu 那条真实探测（nvidia-smi + ollama ps），不另造一套。
+    gpu_avail = False
+    try:
+        from brain.routers import admin
+
+        gpu_avail = bool(admin.gpu_status().get("available"))
+    except Exception:
+        gpu_avail = False
+
     return {
         "status": "ok",
-        "llm": "http",
+        "llm": "http" if llm_info.get("up") else "off",
+        "llm_service": llm_info,
         "judge": judge_mode,
         "judge_service": {"up": judge_up, "url": judge_url},
         "asr": "sherpa-onnx-sensevoice" if asr_ready else "off",
@@ -409,6 +434,6 @@ def health() -> dict:
         "tts": tts_mode,
         "tts_service": {"up": tts_up, "url": tts_url},
         "memory": "sqlite",
-        "gpu": {"available": False},
+        "gpu": {"available": gpu_avail},
         "db": _db_ok(),
     }

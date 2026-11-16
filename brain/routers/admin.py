@@ -740,14 +740,15 @@ async def tts_preview(body: TTSPreviewBody) -> Response:
 # 每个 bat 起的进程都把输出同时写进 data/logs/<中文名>-YYYYMMDD.log
 # （见 brain/log_setup.py）。这里只读文件，不启动、不改任何服务。
 
-_LOG_SERVICES: list[tuple[str, str, int]] = [
-    ("brain", "大脑", int(settings.BRAIN_PORT)),
-    ("console", "控制台", int(settings.CONSOLE_PORT)),
-    ("judge", "情感判断", int(settings.JUDGE_PORT)),
-    ("asr", "语音识别", int(settings.ASR_PORT)),
-    ("tts", "语音合成", int(settings.TTS_PORT)),
-    ("gpt", "GPT语音模型", 9880),
-    ("all", "全部", 0),
+# 第四项 inproc=True：判断/合成已并进大脑进程，不占独立端口，running 报「进程内」。
+_LOG_SERVICES: list[tuple[str, str, int, bool]] = [
+    ("brain", "大脑", int(settings.BRAIN_PORT), False),
+    ("console", "控制台", int(settings.CONSOLE_PORT), False),
+    ("judge", "情感判断", 0, True),
+    ("asr", "语音识别", int(settings.ASR_PORT), False),
+    ("tts", "语音合成", 0, True),
+    ("gpt", "GPT语音模型", 9880, False),
+    ("all", "全部", 0, False),
 ]
 
 _LOG_TAIL_MAX = 512 * 1024   # 最多读文件尾部 512KB，避免几 MB 的 traceback 顶内存
@@ -804,13 +805,15 @@ def list_logs(service: str = Query(default="", description="留空=只列清单�
     log_dir = _log_dir()
 
     items: list[dict[str, Any]] = []
-    for code, name, port in _LOG_SERVICES:
+    for code, name, port, inproc in _LOG_SERVICES:
         path = _log_file(name)
         info: dict[str, Any] = {
             "key": code,
             "name": name,
-            "port": port,
-            "running": _port_open(port),
+            "port": None if inproc else port,
+            "inproc": inproc,
+            "running": True if inproc else _port_open(port),
+            "status": "进程内" if inproc else ("已启动" if _port_open(port) else "未启动"),
             "file": str(path) if path else "",
             "size": path.stat().st_size if path else 0,
             "mtime": "",

@@ -380,10 +380,12 @@ def _migrate_model_services(conn) -> None:
     try:
         from .config import settings
 
-        row = conn.execute("SELECT config_json FROM providers WHERE code='tts'").fetchone()
+        row = conn.execute("SELECT mode, config_json FROM providers WHERE code='tts'").fetchone()
         if row:
-            cfg = json.loads(row[0] or "{}")
-            if isinstance(cfg, dict):
+            cfg = json.loads(row[1] or "{}")
+            tts_mode = str(row[0] or "").strip().lower()
+            # 进程内引擎不占独立端口：不再把空地址回刷成 :8102。
+            if isinstance(cfg, dict) and tts_mode != "inproc":
                 cur = str(cfg.get("base_url") or "").strip().rstrip("/")
                 if cur in ("", "http://127.0.0.1:9880"):
                     cfg["base_url"] = settings.TTS_BASE

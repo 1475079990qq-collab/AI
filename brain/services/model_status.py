@@ -15,12 +15,15 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
 import httpx
 
 from brain.config import settings
+
+log = logging.getLogger("brain.model_status")
 
 _TTL_UP = 2.0      # 在跑：2 秒（够新，也不至于每轮都打）
 _TTL_DOWN = 30.0   # 没起：30 秒。Windows 上连接一个没监听的端口要等 2 秒
@@ -174,6 +177,28 @@ def probe_llm() -> dict[str, Any]:
     result.setdefault("payload", {})["base"] = base
     _cache["llm"] = (_now(), result)
     return result
+
+
+def llm_service() -> dict[str, Any]:
+    """/health 用：探活对话大模型，并标注是否退回了 yaml 兜底。
+
+    卡内 base_url/model 为空、或读卡异常而落到 settings.OLLAMA_BASE 时，
+    打 warning 并在 health 里带 fallback=true，避免「换了模型不知道」。
+    """
+    prov = _provider("llm")
+    cfg = _provider_cfg(prov)
+    card_url = str(cfg.get("base_url") or "").rstrip("/")
+    card_model = str(cfg.get("model") or "").strip()
+    read_ok = bool(prov) and isinstance(cfg, dict) and cfg
+    fallback = (not read_ok) or (not card_url) or (not card_model)
+    if fallback:
+        log.warning("LLM 卡 base_url/model 为空或读取异常，回退 yaml 兜底 %s / %s",
+                    settings.OLLAMA_BASE, settings.LLM_MODEL)
+    res = probe_llm()
+    url = str((res.get("payload") or {}).get("base") or res.get("url")
+              or card_url or settings.OLLAMA_BASE or "")
+    return {"up": bool(res.get("up")), "url": url,
+            "fallback": fallback, "model": card_model}
 
 
 def probe_all() -> dict[str, Any]:
