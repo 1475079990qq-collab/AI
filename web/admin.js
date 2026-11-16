@@ -115,7 +115,8 @@
   }
 
   function chatHref() {
-    var brain = (safeGet(LS_BRAIN) || '').trim() || CFG.BRAIN_OVERRIDE || CFG.BRAIN_URL || '';
+    // 与 resolveConsoleUrl 同一口径：不读 localStorage 旧缓存，避免旧 :8001 / 旧 IP 经 ?brain= 代代相传
+    var brain = CFG.BRAIN_OVERRIDE || CFG.BRAIN_URL || '';
     var consoleUrl = resolveConsoleUrl();
     var q = [];
     if (brain) q.push('brain=' + encodeURIComponent(brain));
@@ -2093,7 +2094,7 @@
       var ttsLabel = ttsRaw === 'inproc' ? '进程内引擎' : (ttsRaw || '未加载');
       svcEl.innerHTML =
         svc('大脑', String(health.status || '').toLowerCase() === 'ok', '进程内') +
-        svc('对话大模型', llmOk, llm.model || '') +
+        svc('对话大模型', llmOk, (llm.config || {}).model || '') +
         svc('情感判断', String(health.judge || '') === 'onnx', '进程内 onnx') +
         svc('语音合成', !!ttsRaw, ttsLabel);
     }
@@ -2274,7 +2275,7 @@
           kpiCard('口吻语料', samples, samples >= 200 ? '够训一版' : '差 ' + Math.max(0, 200 - samples) + ' 条', samples >= 200 ? 'ok' : 'muted') +
           kpiCard('训练集', (ds.train || 0) + ' / ' + (ds.valid || 0), 'train / valid 行数') +
           kpiCard('算力', torch.cuda ? 'GPU 可用' : '仅 CPU', torch.cuda ? '' : '真训会很慢（缺 CUDA torch）', torch.cuda ? 'ok' : 'warn') +
-          kpiCard('可训底座', (st.models || []).length, 'HF 格式的底座数量', (st.models || []).length ? 'ok' : 'warn');
+          kpiCard('可训底座', (((st.models || {}).hf) || []).length, 'HF 格式的底座数量', (((st.models || {}).hf) || []).length ? 'ok' : 'warn');
       }
       var rows = asList(await api('GET', '/api/admin/tone-samples?limit=30'));
       if (!rows.length) {

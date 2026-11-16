@@ -41,6 +41,7 @@
 
   function safeGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
   function safeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 隐私模式忽略 */ } }
+  function safeRemove(k) { try { localStorage.removeItem(k); } catch (e) { /* 隐私模式忽略 */ } }
 
   function randomId(prefix) {
     return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -52,19 +53,67 @@
     return v;
   }
 
-  // 优先级：URL 参数显式覆盖 > localStorage > 按 hostname 推导
+  // ---- brain 地址缓存：带签发上下文 ----
+  // 旧版 LS 里只存纯字符串地址，一旦早期版本存过 :8001 / 旧 IP，升级后旧值会被优先使用。
+  // 现在缓存值升级为 JSON：{ url, port, host }，port/host 是写入那一刻当前配置的端口与页面主机身份；
+  // 读取时只有「同一端口、同一回环身份」下签发的缓存才允许优先于当前配置，否则视为过期自愈清除。
+  function urlParts(u) {
+    try { var p = new URL(u); return { host: p.hostname, port: p.port || '80' }; }
+    catch (e) { return null; }
+  }
+
+  function isLoopback(h) {
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]';
+  }
+
+  function currentBrainContext() {
+    var local = window.COMPANION_LOCAL || {};
+    var pageHost = (typeof location !== 'undefined' && location.hostname) || 'localhost';
+    var port = String(local.brain_port || 8000);
+    var cur = urlParts(CFG.BRAIN_URL || '');
+    if (cur && cur.port) port = cur.port;
+    return { port: port, host: pageHost };
+  }
+
+  function persistBrainUrl(url) {
+    var ctx = currentBrainContext();
+    safeSet(LS_BRAIN, JSON.stringify({ url: url, port: ctx.port, host: ctx.host }));
+  }
+
+  function readValidBrainUrl() {
+    var raw = (safeGet(LS_BRAIN) || '').trim();
+    if (!raw) return null;
+    var rec = null;
+    try { rec = JSON.parse(raw); } catch (e) { rec = null; }
+    // ① 老格式纯字符串 / 非法 JSON / 缺 url 字段 → 过期，丢弃并清除
+    if (!rec || typeof rec !== 'object' || typeof rec.url !== 'string' || !rec.url) {
+      safeRemove(LS_BRAIN);
+      return null;
+    }
+    var ctx = currentBrainContext();
+    // ② 签发端口与当前 brain 端口不一致 → 过期
+    if (String(rec.port) !== String(ctx.port)) { safeRemove(LS_BRAIN); return null; }
+    // ③ 回环 / 非回环主机身份对调 → 过期（本机缓存不能拿去连局域网，反之亦然）
+    if (isLoopback(String(rec.host || '')) !== isLoopback(ctx.host)) {
+      safeRemove(LS_BRAIN);
+      return null;
+    }
+    return rec.url;
+  }
+
+  // 优先级：URL 参数显式覆盖 > 带上下文校验通过的缓存 > 按 hostname 推导
   function resolveBrainUrl() {
     if (CFG.BRAIN_OVERRIDE) {
-      safeSet(LS_BRAIN, CFG.BRAIN_OVERRIDE);
+      persistBrainUrl(CFG.BRAIN_OVERRIDE);
       return CFG.BRAIN_OVERRIDE;
     }
-    var saved = (safeGet(LS_BRAIN) || '').trim();
+    var saved = readValidBrainUrl();
     return saved || CFG.BRAIN_URL || 'http://localhost:8000';
   }
 
   function adminHref() {
     var brain = resolveBrainUrl();
-    var consoleUrl = CFG.CONSOLE_OVERRIDE || (safeGet(LS_CONSOLE) || '').trim() || CFG.CONSOLE_URL || '';
+    var consoleUrl = CFG.CONSOLE_OVERRIDE || CFG.CONSOLE_URL || '';
     var q = [];
     if (brain) q.push('brain=' + encodeURIComponent(brain));
     if (consoleUrl) q.push('console=' + encodeURIComponent(consoleUrl));
@@ -861,7 +910,7 @@
       var v = ($serverInput.value || '').trim().replace(/\/+$/, '');
       if (!v) { $serverHint.textContent = '地址不能为空'; return; }
       if (!/^https?:\/\//i.test(v)) { $serverHint.textContent = '需以 http:// 或 https:// 开头'; return; }
-      safeSet(LS_BRAIN, v);
+      persistBrainUrl(v);
       if (CFG.BRAIN_OVERRIDE) CFG.BRAIN_OVERRIDE = null;  // 手动编辑优先于 URL 覆盖
       $serverInput.value = v;
       $serverHint.textContent = '已保存：' + v;
