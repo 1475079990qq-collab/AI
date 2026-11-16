@@ -538,6 +538,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                       color: _textPrimary,
                     ),
                   ),
+                  // 语音没起来时的一行灰字：紧跟正文下方、左对齐，无卡片无边框；
+                  // 只挂在本轮最新一条助手消息上，合成恢复后由 provider 自动清空。
+                  if (chat.ttsNotice != null &&
+                      identical(msg, chat.activeAssistant))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        chat.ttsNotice!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          height: 1.5,
+                          letterSpacing: 0.2,
+                          color: _textMuted,
+                        ),
+                      ),
+                    ),
                   if (msg.card != null) _deliverCard(chat, msg),
                 ],
               ),

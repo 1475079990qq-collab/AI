@@ -117,6 +117,10 @@ class ChatProvider extends ChangeNotifier {
   String serverUrl = '';
   String? lastError;
 
+  /// 本轮语音没起来时给界面的一行可读说明；null 表示没有要提示的。
+  /// 只挂在最新一条助手消息下方，不弹框、不打断字幕与打字流。
+  String? ttsNotice;
+
   /// 还没设过地址（仍是模拟器默认值），界面上要先引导填服务器地址。
   bool get needsServerSetup => !_config.hasCustomUrl;
 
@@ -177,6 +181,12 @@ class ChatProvider extends ChangeNotifier {
   /// 用户手动点了「停止朗读」：本轮后续只出字、不出声。
   bool _mute = false;
 
+  /// 本轮是否已经有一句合成成功；成功过一次，之前的语音提示就自动消失。
+  bool _ttsSucceeded = false;
+
+  /// 本轮是否已经挂过一次语音提示：同轮内只提示一次，不重复叠加。
+  bool _noticeShown = false;
+
   /// 正在播放语音的那条助手消息（界面用它播报指示）。
   ChatMessage? _speaking;
 
@@ -205,6 +215,9 @@ class ChatProvider extends ChangeNotifier {
 
   /// 正在被朗读的那条消息；界面据此高亮。
   ChatMessage? get speakingMessage => _speaking;
+
+  /// 本轮正在逐句揭示的助手消息；界面据此把语音提示挂到最新一条下面。
+  ChatMessage? get activeAssistant => _activeAssistant;
 
   void _safeNotify() {
     if (!_disposed) notifyListeners();
@@ -289,8 +302,11 @@ class ChatProvider extends ChangeNotifier {
     if (trimmed.isEmpty || isStreaming) return;
 
     lastError = null;
+    ttsNotice = null;
     _cancelled = false;
     _mute = false;
+    _ttsSucceeded = false;
+    _noticeShown = false;
     _speaking = null;
     // 上一轮没揭示完的字先补齐，别让用户丢字。
     final ChatMessage? previous = _activeAssistant;
@@ -445,6 +461,7 @@ class ChatProvider extends ChangeNotifier {
         // 用户已点停止朗读：不再合成，只把字幕按节奏放出来。
         if (!_mute) job.audio = await _synthWithRetry(job);
         if (job.gen != _gen) continue;
+        _handleSynthResult(job);
         _playQueue.add(job);
         unawaited(_pumpPlay());
       }
@@ -457,18 +474,59 @@ class ChatProvider extends ChangeNotifier {
   ///
   /// 以前失败就把这句静音跳过，听感上就是「说到一半突然没声了」，
   /// 而多数失败是一次性的（上游忙、连接抖动），补一次基本就回来了。
+  /// 两次都失败时，把最后一次的可读原因记到 [job] 上，由 [_handleSynthResult]
+  /// 决定要不要在界面上提示；这里仍然只返回 null，不出声就是不出声。
   Future<Uint8List?> _synthWithRetry(_SpeechJob job) async {
+    String? lastReason;
     for (int attempt = 0; attempt < 2; attempt++) {
       if (job.gen != _gen || _cancelled) return null;
       try {
         return await _client.tts(text: job.text, emotion: job.emotion);
-      } catch (_) {
+      } catch (error) {
+        lastReason = _ttsErrorMessage(error);
         if (attempt == 0) {
           await Future<void>.delayed(const Duration(milliseconds: 400));
         }
       }
     }
+    job.ttsError = lastReason;
     return null;   // TTS 真的不可用：只出字，不出声。
+  }
+
+  /// 合成结果落到语音提示状态：
+  /// - 成功：本轮记一次「出声过」，之前挂着的提示自动清空；
+  /// - 失败：本轮还没成功过、也还没提示过时，挂一行可读说明；
+  ///   已经成功过（中途断一句）或本轮已提示过，就静默跳过，不叠加、不打断字幕。
+  void _handleSynthResult(_SpeechJob job) {
+    if (job.audio != null) {
+      _ttsSucceeded = true;
+      if (ttsNotice != null) {
+        ttsNotice = null;
+        _noticeShown = false;
+        _safeNotify();
+      }
+      return;
+    }
+    if (_mute || _ttsSucceeded || _noticeShown) return;
+    final String reason = (job.ttsError == null || job.ttsError!.isEmpty)
+        ? '语音合成未返回音频'
+        : job.ttsError!;
+    final String clipped =
+        reason.length > 60 ? reason.substring(0, 60) : reason;
+    ttsNotice = '语音没起来：$clipped';
+    _noticeShown = true;
+    _safeNotify();
+  }
+
+  /// 把异常压成一行可读文字：去掉 Dart `Exception: ` 前缀，空消息给兜底。
+  String _ttsErrorMessage(Object error) {
+    String message = error.toString().trim();
+    const String prefix = 'Exception: ';
+    if (message.startsWith(prefix)) {
+      message = message.substring(prefix.length).trim();
+    }
+    if (message.isEmpty) message = '语音合成未返回音频';
+    return message;
   }
 
   /// 播放一段，同时把这一段字幕放到界面上：声音和文字同一时刻出现。
@@ -595,6 +653,9 @@ class ChatProvider extends ChangeNotifier {
     isStreaming = false;
     currentEmotion = 'neutral';
     lastError = null;
+    ttsNotice = null;
+    _ttsSucceeded = false;
+    _noticeShown = false;
     _safeNotify();
   }
 
@@ -632,4 +693,7 @@ class _SpeechJob {
 
   /// 合成好的 WAV；null 表示 TTS 不可用，只出字。
   Uint8List? audio;
+
+  /// 两次重试都失败时记录的可读原因；null 表示成功或还没失败过。
+  String? ttsError;
 }

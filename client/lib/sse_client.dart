@@ -279,17 +279,25 @@ class SseClient {
           await client.send(request).timeout(const Duration(seconds: 25));
       if (response.statusCode != 200) {
         String detail = 'HTTP ${response.statusCode}';
+        String? code;
+        String body = '';
         try {
-          final String body =
-              await response.stream.transform(utf8.decoder).join();
+          body = await response.stream.transform(utf8.decoder).join();
           final Object? decoded = jsonDecode(body);
-          if (decoded is Map && decoded['detail'] != null) {
-            detail = '${decoded['detail']}';
+          if (decoded is Map) {
+            final Object? d = decoded['detail'];
+            if (d != null && '$d'.trim().isNotEmpty) detail = '$d';
+            final Object? c = decoded['code'];
+            if (c != null && '$c'.trim().isNotEmpty) code = '$c';
           }
         } catch (_) {
-          // 非 JSON 的错误体：保留状态码。
+          // 非 JSON 的错误体：有纯文本就带上，否则保留状态码。
+          if (body.trim().isNotEmpty) detail = body.trim();
         }
-        throw Exception('TTS 不可用：$detail');
+        // 后端 503 体形如 {"detail":"真实原因","code":"TTS_UNAVAILABLE"}；
+        // detail 是给人看的原因，code 只作补充标注。
+        final String label = code == null ? detail : '$detail（$code）';
+        throw Exception('TTS 不可用：$label');
       }
       // 不依赖 ByteStream.toBytes()，逐块汇总，兼容各版本 http。
       final List<List<int>> chunks = await response.stream
