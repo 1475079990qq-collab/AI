@@ -70,7 +70,7 @@
   .row .nm { flex: 0 1 auto; font-size: 11.5px; }
   .row .val {
     flex: 1 1 auto; min-width: 0; font-size: 10.5px; color: var(--muted);
-    text-align: right; white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+    text-align: right; white-space: normal; overflow-wrap: break-word; word-break: normal;
     font-variant-numeric: tabular-nums;
   }
   /* 说明文字按词整体换行，不在中文/上限数字中间硬折 */
@@ -79,14 +79,20 @@
     word-break: keep-all; overflow-wrap: normal;
   }
   .row.idle .nm { color: #6e797d; }
-  .where { margin-top: 6px; font-size: 10px; color: #6e797d; line-height: 1.5; }
+  .where {
+    margin-top: 6px; font-size: 10px; color: #6e797d; line-height: 1.5;
+    word-break: keep-all; overflow-wrap: normal;
+  }
   .where code { color: #93a0a4; }
 
   .feed { padding: 10px 14px 8px; flex: 0 0 auto; }
-  .feed .line { display: flex; gap: 8px; padding: 1px 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .feed .line { display: flex; gap: 8px; padding: 0 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .feed .k { color: #93a0a4; flex: 0 0 78px; }
   .feed .region { color: #93a0a4; flex: 0 0 54px; }
   .feed .line b { color: var(--ink); font-weight: 600; }
+  /* 后台工序（拼上下文 / 合成语音 / 落库）：灰字，不上画布 */
+  .feed .line.internal { color: #6e797d; }
+  .feed .line.internal .k, .feed .line.internal .region { color: #5f696d; }
 
   .lessons { padding: 10px 14px 8px; }
   .lesson-item { padding: 5px 0; border-bottom: 1px dashed rgba(255,255,255,.07); }
@@ -118,7 +124,7 @@
   <div class="layout">
     <div class="left">
       <div class="panel legend" id="legend">
-        <div class="t">九个脑区 · <span id="legend-count">0</span> 个神经元</div>
+        <div class="t">八个认知区 · <span id="legend-count">0</span> 个神经元</div>
         <div id="legend-rows"></div>
         <div class="where">
           <span id="fact-load">读取事实中…</span> · SSE 实时推送，断线自动重连。
@@ -139,10 +145,10 @@
   </div>
 
   <div class="foot">
-    位置 = 固定的脑形编组（听见 → 判断 → 记忆 → 提示词 → 工具 → 思考 → 出字 → 声音 → 收尾），不随数据乱跑。<br>
-    放电量来自真实量级：情绪强度、事实条数、上下文字数、已出字数、语音 KB；停下来后按真实时刻留余辉，不凭空造脉冲。<br>
+    位置 = 固定的脑形编组（听见 → 情绪 → 回忆 → 联想 → 判断 → 表达 → 反思 → 沉淀），不随数据乱跑。<br>
+    亮起来自真实事件：他说了什么、读到什么情绪、想起哪条旧事、牵出哪个词、拿了什么主意、正在说出的字、说完回头看了什么、留下了什么；停下来后按真实时刻留余辉，不凭空造脉冲。<br>
     记忆不是整片一起亮：先点亮这轮真正召回的那几条事实，再顺着「共享两字词」的联想带出一串；想起过的事余温更久（约 5 秒），其余约 1.9 秒。按「定格」可停住衰减，数清刚亮了哪一片。<br>
-    说完之后还会自己复盘（收尾区那组事件）：发现复读、旁白、太长、串味，就写成一条「下次怎么改」，下一轮进提示词。
+    拼上下文、合成语音、落库这些后台工序不上画布，只在「最近事件」里以灰字记一笔；说完之后的复盘会写成一条「下次怎么改」。
   </div>
 </div>
 

@@ -1,24 +1,25 @@
-/* brain-growth.js — 脑区「真实生长」纯逻辑模块（零依赖、同种子确定性）。
+/* brain-growth.js — 脑区「真实生长」纯逻辑模块（零依赖、同种子确定性、不设数量上限）。
  *
  * 与 brain.js 的分叉接口（阶段二由 brain.js 转走本模块；本文件不碰 DOM、不碰画布）：
  *   window.BrainGrowth.build(facts, lessons, opts) -> {
  *     neurons: [{ nx, ny, region, size, delay, fid, kind }],
- *     edges: [[i, j]],            // 突触：最近邻 + 跨区长投射
- *     assocPairs: [[i, j]],       // 共享两字词（中文 bigram）的联想边
- *     memAnchors: { fid: index }, // 每条事实自己那颗记忆区神经元的下标
+ *     edges: [[i, j]],            // 突触：网格近邻 + 稀疏跨区长投射（边预算自适应）
+ *     assocPairs: [[i, j]],       // 共享两字词（中文 bigram）的联想边（距离分桶降采样）
+ *     memAnchors: { fid: index }, // 每条事实自己那颗记忆区神经元的下标（1:1，不共享）
  *     lessonAnchors: { fid: index },
- *     counts: [9 个数],          // 0听见 1情感判断 2记忆检索 3提示词 4工具 5思考 6出字 7声音 8收尾
- *     total, cap: { fact, lesson }, factCap, lessonCap,
- *     factTotal, lessonTotal,
- *     overCap: { facts, lessons }, baseCount, seed
+ *     counts: [8 个数],          // 0听见 1情绪 2回忆 3联想 4判断 5表达 6反思 7沉淀
+ *     total, cap: { fact: null, lesson: null }, factCap, lessonCap,
+ *     factTotal, lessonTotal, overCap: { facts: 0, lessons: 0 },
+ *     baseCount, seed, edgeStats
  *   }
  *
- * 规则要点（与 _审核/生长策略-2026-11-16.md 对应）：
+ * 规则要点：
  *   - 结构神经元基数 baseCount（默认 680）不缩水；
- *   - 每条有效事实占一颗记忆区(region=2)神经元，每条有效教训占一颗收尾区(region=8)神经元；
- *   - 事实硬上限 factCap（默认 600），教训硬上限 lessonCap（默认 60）；超上限不丢事实，
- *     多余条目按 id 哈希轮询挂靠到已有神经元上，锚点仍能定位；
- *   - 所有随机来自固定种子（默认 20261116，与 brain.js 旧种子一致），同一份输入两次构建逐点相同；
+ *   - 每条有效事实一颗回忆区(region=2)神经元、每条有效教训一颗沉淀区(region=7)神经元，
+ *     永久 1:1：不截断、不合并、不挂靠；memAnchors[fid] 精确定位到自己那颗；
+ *   - 不设事实/教训数量上限（cap=null）；护栏是性能策略，不是数量上限：
+ *     突触走空间网格近邻（O(N·k)），联想边按距离分桶 + 每桶上限；
+ *   - 所有随机来自固定种子（默认 20261116），同一份输入两次构建逐点相同；
  *   - 坐标必须落在 brain.js insideBrain 轮廓之内，不允许 NaN / 越界。
  */
 (function (root, factory) {
@@ -33,27 +34,31 @@
 
   var SEED = 20261116;
 
-  // 九区下标与 brain.js REGIONS 保持一致（cx/cy 为区中心归一化坐标，weight 为分区权重）
+  // 八区冻结下标：0 听见 / 1 情绪 / 2 回忆 / 3 联想 / 4 判断 / 5 表达 / 6 反思 / 7 沉淀
+  // cx/cy 为区中心归一化坐标，weight 为分区权重；坐标仍须落在 insideBrain 轮廓内。
   var REGIONS = [
-    { key: 'input',   name: '听见',     cx: 0.50, cy: 0.88, weight: 0.09 },
-    { key: 'judge',   name: '情感判断', cx: 0.25, cy: 0.68, weight: 0.12 },
-    { key: 'memory',  name: '记忆检索', cx: 0.74, cy: 0.64, weight: 0.12 },
-    { key: 'prompt',  name: '提示词',   cx: 0.79, cy: 0.42, weight: 0.10 },
-    { key: 'tool',    name: '工具',     cx: 0.63, cy: 0.76, weight: 0.08 },
-    { key: 'llm',     name: '思考',     cx: 0.40, cy: 0.42, weight: 0.22 },
-    { key: 'token',   name: '出字',     cx: 0.55, cy: 0.24, weight: 0.12 },
-    { key: 'voice',   name: '声音',     cx: 0.29, cy: 0.30, weight: 0.09 },
-    { key: 'done',    name: '收尾',     cx: 0.17, cy: 0.50, weight: 0.07 }
+    { key: 'input',   name: '听见', cx: 0.50, cy: 0.88, weight: 0.09 },
+    { key: 'emotion', name: '情绪', cx: 0.25, cy: 0.68, weight: 0.12 },
+    { key: 'memory',  name: '回忆', cx: 0.74, cy: 0.64, weight: 0.12 },
+    { key: 'assoc',   name: '联想', cx: 0.63, cy: 0.76, weight: 0.10 },
+    { key: 'judge',   name: '判断', cx: 0.40, cy: 0.42, weight: 0.15 },
+    { key: 'express', name: '表达', cx: 0.55, cy: 0.24, weight: 0.16 },
+    { key: 'reflect', name: '反思', cx: 0.29, cy: 0.30, weight: 0.09 },
+    { key: 'settle',  name: '沉淀', cx: 0.17, cy: 0.50, weight: 0.07 }
   ];
 
   var DEFAULTS = {
     seed: SEED,
     baseCount: 680,    // 结构神经元基数（不随事实条数缩水）
-    factCap: 600,      // 记忆区硬上限：最多 600 颗事实神经元
-    lessonCap: 60,     // 收尾区硬上限：最多 60 颗教训神经元
-    synCap: 3200,      // 突触边总量上限（去重后截断，避免画布过重）
-    assocCap: 4000,    // 联想边总量上限
-    nearK: 3           // 每个神经元接最近邻的个数
+    nearK: 3,          // 每神经元保留的最近邻短边数（另留 1 条中距边）
+    grid: 10,          // 空间网格边数（归一化坐标分桶，近邻只查本格 + 8 邻格）
+    synCeiling: 6000,  // 突触全局硬顶（性能护栏，不是神经元数量上限）
+    // 联想边按两端距离分桶，每桶独立上限；越远的桶越先被降采样
+    assocBuckets: [
+      { max: 0.08, cap: 2000 },   // 近邻联想
+      { max: 0.16, cap: 1200 },   // 中距联想
+      { max: Infinity, cap: 400 }  // 远端联想（最稀）
+    ]
   };
 
   // 与 brain.js 完全一致的固定种子伪随机（mulberry32 风格），保证跨文件同种子结果可比
@@ -86,15 +91,6 @@
     return true;
   }
 
-  function hashStr(s) {
-    var h = 2166136261;
-    for (var i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return h >>> 0;
-  }
-
   // 按「权重 + 距离」给一个坐标分区（沿用 brain.js build 的打分方式）
   function assignRegion(nx, ny) {
     var best = 0, bestScore = 1e9;
@@ -108,6 +104,30 @@
   }
 
   function clamp01(v) { return Math.min(0.97, Math.max(0.03, v)); }
+
+  // 空间网格：把归一化坐标分到 grid×grid 格子，近邻搜索只查本格 + 8 邻格，
+  // 边构建复杂度从 O(N²) 降到 O(N·k)，保证构建耗时随 N 近似线性。
+  function makeGrid(grid) {
+    var size = grid * grid;
+    var buckets = new Array(size);
+    for (var i = 0; i < size; i++) buckets[i] = [];
+    return { grid: grid, buckets: buckets };
+  }
+  function gridCell(g, nx, ny) {
+    var cx = Math.min(g.grid - 1, Math.max(0, Math.floor(nx * g.grid)));
+    var cy = Math.min(g.grid - 1, Math.max(0, Math.floor(ny * g.grid)));
+    return cy * g.grid + cx;
+  }
+  function forNeighborCells(g, cell, cb) {
+    var gx = cell % g.grid, gy = Math.floor(cell / g.grid);
+    for (var dy = -1; dy <= 1; dy++) {
+      for (var dx = -1; dx <= 1; dx++) {
+        var x = gx + dx, y = gy + dy;
+        if (x < 0 || y < 0 || x >= g.grid || y >= g.grid) continue;
+        cb(y * g.grid + x);
+      }
+    }
+  }
 
   // 在某区中心周围的椭圆补丁里取一个脑形内坐标；环形回退保证绝不落到脑外 / NaN。
   function patchPoint(seed, k, cx, cy, rx, ry) {
@@ -160,11 +180,10 @@
     opts = opts || {};
     var seed = opts.seed != null ? opts.seed | 0 : DEFAULTS.seed;
     var baseCount = opts.baseCount != null ? opts.baseCount | 0 : DEFAULTS.baseCount;
-    var factCap = opts.factCap != null ? opts.factCap | 0 : DEFAULTS.factCap;
-    var lessonCap = opts.lessonCap != null ? opts.lessonCap | 0 : DEFAULTS.lessonCap;
-    var synCap = opts.synCap != null ? opts.synCap | 0 : DEFAULTS.synCap;
-    var assocCap = opts.assocCap != null ? opts.assocCap | 0 : DEFAULTS.assocCap;
     var nearK = opts.nearK != null ? opts.nearK | 0 : DEFAULTS.nearK;
+    var gridN = opts.grid != null ? opts.grid | 0 : DEFAULTS.grid;
+    var synCeiling = opts.synCeiling != null ? opts.synCeiling | 0 : DEFAULTS.synCeiling;
+    var assocBuckets = opts.assocBuckets || DEFAULTS.assocBuckets;
 
     var factList = normalize(facts, 'text');
     var lessonList = normalize(lessons, 'note');
@@ -174,8 +193,6 @@
     var neurons = [];
     var memAnchors = {};
     var lessonAnchors = {};
-    var factNeuronIds = [];
-    var lessonNeuronIds = [];
 
     // ---- 1. 结构神经元基数：沿用旧 build 的采样与分区，固定种子 ----
     var rand = rng(seed);
@@ -192,12 +209,10 @@
     }
     var baseCountActual = neurons.length;
 
-    // ---- 2. 事实神经元：记忆检索区(2)，一条一颗；超上限的挂靠到已有颗 ----
+    // ---- 2. 事实神经元：回忆区(2)，一条一颗，永久 1:1，不截断不合并 ----
     var memCenter = REGIONS[2];
-    var factN = Math.min(factTotal, factCap);
-    var ft = factN / Math.max(1, factCap);           // 0..1，补丁随条数略微撑开
-    var fRx = 0.105 + 0.065 * ft, fRy = 0.085 + 0.055 * ft;
-    for (var k = 0; k < factN; k++) {
+    var fRx = 0.16, fRy = 0.13;   // 补丁固定在脑形内；密度随条数上升，不向外扩出轮廓
+    for (var k = 0; k < factTotal; k++) {
       var f = factList[k];
       var p = patchPoint(seed, k, memCenter.cx, memCenter.cy, fRx, fRy);
       var idx = neurons.length;
@@ -208,79 +223,93 @@
         fid: f.id, kind: 'fact'
       });
       memAnchors[f.id] = idx;
-      factNeuronIds.push(idx);
-    }
-    // 超上限事实：不丢，按 id 哈希均匀挂靠到已有记忆神经元；锚点仍可定位到该颗
-    for (var e = factCap; e < factTotal; e++) {
-      var ef = factList[e];
-      var anchor = factNeuronIds.length
-        ? factNeuronIds[hashStr(ef.id) % factNeuronIds.length] : null;
-      if (anchor !== null) memAnchors[ef.id] = anchor;
     }
 
-    // ---- 3. 教训神经元：收尾区(8)，一条一颗 ----
-    var doneCenter = REGIONS[8];
-    var lessonN = Math.min(lessonTotal, lessonCap);
-    var lt = lessonN / Math.max(1, lessonCap);
-    var lRx = 0.075 + 0.045 * lt, lRy = 0.105 + 0.055 * lt;
-    for (var l = 0; l < lessonN; l++) {
+    // ---- 3. 教训神经元：沉淀区(7)，一条一颗，永久 1:1 ----
+    var doneCenter = REGIONS[7];
+    var lRx = 0.075, lRy = 0.105;
+    for (var l = 0; l < lessonTotal; l++) {
       var ls = lessonList[l];
       var lp = patchPoint(seed, l ^ 0x7A1, doneCenter.cx, doneCenter.cy, lRx, lRy);
       var lidx = neurons.length;
       neurons.push({
-        nx: lp.nx, ny: lp.ny, region: 8,
+        nx: lp.nx, ny: lp.ny, region: 7,
         size: 1.0 + rngAt(seed, l ^ 0x61)() * 0.6,
         delay: rngAt(seed, l ^ 0x62)() * 0.4,
         fid: ls.id, kind: 'lesson'
       });
       lessonAnchors[ls.id] = lidx;
-      lessonNeuronIds.push(lidx);
-    }
-    for (var le = lessonCap; le < lessonTotal; le++) {
-      var el = lessonList[le];
-      var lanchor = lessonNeuronIds.length
-        ? lessonNeuronIds[hashStr(el.id) % lessonNeuronIds.length] : null;
-      if (lanchor !== null) lessonAnchors[el.id] = lanchor;
     }
 
-    // ---- 4. 突触边：每个神经元接最近 nearK 个（同区优先），再加跨区「长投射」 ----
+    // ---- 4. 突触边：网格近邻 + 稀疏跨区长投射；边预算自适应，复杂度 O(N·k) ----
     var N = neurons.length;
     var edges = [];
+    var grid = makeGrid(gridN);
+    neurons.forEach(function (n, i) { grid.buckets[gridCell(grid, n.nx, n.ny)].push(i); });
+    var regionMembers = [];
+    for (var r0 = 0; r0 < REGIONS.length; r0++) regionMembers.push([]);
+    neurons.forEach(function (n, i) { regionMembers[n.region].push(i); });
+
+    var seenEdge = {};
+    function pushEdge(a, b) {
+      if (a === b) return;
+      var lo = a < b ? a : b, hi = a < b ? b : a;
+      var key = lo + ':' + hi;
+      if (seenEdge[key]) return;
+      seenEdge[key] = true;
+      edges.push([lo, hi]);
+    }
+
     for (var i = 0; i < N; i++) {
       var a = neurons[i];
-      var near = [];
-      for (var j = 0; j < N; j++) {
-        if (i === j) continue;
-        var b = neurons[j];
-        var d = Math.hypot((a.nx - b.nx) * 1.35, a.ny - b.ny);
-        if (b.region === a.region) d *= 0.72;
-        near.push([d, j]);
+      var keeper = [];   // 只留最近的 keepMax 个：小插入表，避免对候选全量排序
+      var keepMax = nearK + 1;
+      forNeighborCells(grid, gridCell(grid, a.nx, a.ny), function (cell) {
+        var bucket = grid.buckets[cell];
+        for (var c = 0; c < bucket.length; c++) {
+          var j = bucket[c];
+          if (j === i) continue;
+          var b = neurons[j];
+          var d = Math.hypot((a.nx - b.nx) * 1.35, a.ny - b.ny);
+          if (b.region === a.region) d *= 0.72;
+          var pos = keeper.length;
+          while (pos > 0 && keeper[pos - 1][0] > d) pos--;
+          if (keeper.length < keepMax) {
+            keeper.splice(pos, 0, [d, j]);
+          } else if (pos < keeper.length) {
+            keeper.pop();
+            keeper.splice(pos, 0, [d, j]);
+          }
+        }
+      });
+      var shortKept = 0, midKept = 0;
+      for (var ci = 0; ci < keeper.length; ci++) {
+        var dd = keeper[ci][0], jd = keeper[ci][1];
+        if (dd < 0.06) {                       // 短边：最近 nearK 个
+          if (shortKept >= nearK) continue;
+          pushEdge(i, jd); shortKept++;
+        } else if (dd < 0.12) {                // 中距边：每神经元最多 1 条
+          if (midKept >= 1) continue;
+          pushEdge(i, jd); midKept++;
+        }
+        // 更远的本地边直接降采样丢弃，避免长直线铺满画布
       }
-      near.sort(function (p, q) { return p[0] - q[0]; });
-      for (var k2 = 0; k2 < nearK && k2 < near.length; k2++) {
-        var id = near[k2][1];
-        if (i < id) edges.push([i, id]);
-      }
+      // 跨区稀疏长投射：每 26 颗取一颗，连隔壁区最近的一颗（只扫该区成员）
       if (i % 26 === 0) {
         var nextRegion = (a.region + 1) % REGIONS.length;
+        var members = regionMembers[nextRegion];
         var bestId = -1, bestD = 1e9;
-        for (var m = 0; m < N; m++) {
-          if (neurons[m].region !== nextRegion) continue;
-          var dd = Math.hypot((a.nx - neurons[m].nx) * 1.35, a.ny - neurons[m].ny);
-          if (dd < bestD) { bestD = dd; bestId = m; }
+        for (var m = 0; m < members.length; m++) {
+          var mm = members[m];
+          var dd2 = Math.hypot((a.nx - neurons[mm].nx) * 1.35, a.ny - neurons[mm].ny);
+          if (dd2 < bestD) { bestD = dd2; bestId = mm; }
         }
-        if (bestId >= 0 && bestD < 0.22) edges.push([i, bestId]);
+        if (bestId >= 0 && bestD < 0.22) pushEdge(i, bestId);
       }
     }
-    var seenEdge = {};
-    edges = edges.filter(function (e2) {
-      var key = e2[0] + ':' + e2[1];
-      if (seenEdge[key]) return false;
-      seenEdge[key] = true;
-      return true;
-    }).slice(0, synCap);
+    if (edges.length > synCeiling) edges = edges.slice(0, synCeiling);
 
-    // ---- 5. 联想边：事实文本共享两字词（中文 bigram），沿用召回同款词重合思路 ----
+    // ---- 5. 联想边：事实文本共享两字词（中文 bigram）；按距离分桶降采样，远端桶最稀 ----
     var assocPairs = [];
     var grams = {};
     factList.forEach(function (f) {
@@ -293,7 +322,14 @@
       }
     });
     var seenPair = {};
-    Object.keys(grams).forEach(function (gram) {
+    var assocCount = new Array(assocBuckets.length).fill(0);
+    function assocBucket(d) {
+      for (var bi = 0; bi < assocBuckets.length; bi++) {
+        if (d < assocBuckets[bi].max) return bi;
+      }
+      return assocBuckets.length - 1;
+    }
+    Object.keys(grams).sort().forEach(function (gram) {
       var ids = grams[gram];
       for (var x = 0; x < ids.length; x++) {
         for (var y = x + 1; y < ids.length; y++) {
@@ -301,15 +337,18 @@
           if (u === undefined || v === undefined || u === v) continue;
           var pk = u < v ? u + ':' + v : v + ':' + u;
           if (seenPair[pk]) continue;
+          var d = Math.hypot((neurons[u].nx - neurons[v].nx) * 1.35, neurons[u].ny - neurons[v].ny);
+          var bi = assocBucket(d);
+          if (assocCount[bi] >= assocBuckets[bi].cap) continue;
           seenPair[pk] = true;
+          assocCount[bi]++;
           assocPairs.push([u, v]);
         }
       }
     });
-    assocPairs = assocPairs.slice(0, assocCap);
 
     // ---- 6. 汇总 ----
-    var counts = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+    var counts = [0, 0, 0, 0, 0, 0, 0, 0];
     neurons.forEach(function (n) { counts[n.region]++; });
 
     return {
@@ -320,14 +359,16 @@
       lessonAnchors: lessonAnchors,
       counts: counts,
       total: N,
-      cap: { fact: factCap, lesson: lessonCap },
-      factCap: factCap,
-      lessonCap: lessonCap,
+      cap: { fact: null, lesson: null },   // 不设数量上限
+      factCap: null,
+      lessonCap: null,
       factTotal: factTotal,
       lessonTotal: lessonTotal,
-      overCap: {
-        facts: Math.max(0, factTotal - factCap),
-        lessons: Math.max(0, lessonTotal - lessonCap)
+      overCap: { facts: 0, lessons: 0 },
+      edgeStats: {
+        syn: edges.length,
+        assoc: assocPairs.length,
+        assocBuckets: assocCount.slice()
       },
       baseCount: baseCountActual,
       seed: seed
@@ -339,6 +380,6 @@
     insideBrain: insideBrain,
     REGIONS: REGIONS,
     DEFAULTS: DEFAULTS,
-    version: '1.0.0'
+    version: '1.1.0-unbounded'
   };
 });
