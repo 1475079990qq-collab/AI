@@ -20,7 +20,7 @@ from typing import AsyncIterator
 from brain import db, tools
 from brain.config import settings
 from brain.schemas import ChatRequest, EmotionResult, TurnEvent, new_request_id
-from brain.services import feedback_rules, judge, llm, memory, prompt, tone
+from brain.services import feedback_rules, judge, live, llm, memory, prompt, tone
 
 try:
     from brain import config_store
@@ -200,6 +200,9 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
     assistant_name = str((runtime or {}).get("assistant_name") or "").strip()
 
     def _do() -> None:
+        _t_bg = time.perf_counter()
+        live.emit("bg_start", job="自检与摘要")
+        ok = True
         try:
             from brain.services import checks, digest
 
@@ -214,7 +217,12 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
                 digest.detect_open_loop(user_text, user_id)
             digest.rebuild_episode(user_id)
         except Exception:
+            ok = False
             log.exception("流后后台任务失败（自检/摘要）")
+        finally:
+            # 真实的后台耗时：说完话之后它还在整理，这一段也看得见
+            live.emit("bg_done", job="自检与摘要", ok=ok,
+                      ms=round((time.perf_counter() - _t_bg) * 1000.0, 1))
 
     try:
         loop = asyncio.get_running_loop()
@@ -227,6 +235,7 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
 async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIterator[TurnEvent]:
     started = time.perf_counter()
     request_id = req.request_id or new_request_id()
+    live.emit("turn_start", request_id=request_id, text_len=len(req.text or ""))
     event_id: int | None = None
     turn_id: int | None = None
     stage = "judge"
@@ -279,9 +288,15 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
 
         # ---- 1) 情感判断（同步函数丢线程池，避免阻塞事件循环）----
         stage = "judge"
+        _t_judge = time.perf_counter()
         emotion: EmotionResult = (
             await asyncio.to_thread(judge.judge, req.text, history, request_id)
         ).normalized()
+        live.emit("judge",
+                  emotion=emotion.label,
+                  intensity=float(emotion.intensity or 0),
+                  ms=round((time.perf_counter() - _t_judge) * 1000.0, 1),
+                  degraded=bool(emotion.degraded))
 
         degraded = bool(emotion.degraded)
 
@@ -368,13 +383,24 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             top_k = settings.MEMORY_TOP_K
         # 必须放线程池：memory.retrieve 内部是同步 SQLite 读，
         # 直接在事件循环里跑会卡住整条 SSE（历史上知识库 ev.wait(2.0) 就是这么卡的）。
+        _t_mem = time.perf_counter()
         bundle = await asyncio.to_thread(
             memory.retrieve, req.user_id, req.text, top_k
         ) or {}
+        live.emit("memory",
+                  facts=len(bundle.get("facts") or []),
+                  emotions=len(bundle.get("emotions") or []),
+                  episodes=len(bundle.get("episodes") or []),
+                  open_loops=len(bundle.get("open_loops") or []),
+                  source=str(bundle.get("source") or ""),
+                  ms=round((time.perf_counter() - _t_mem) * 1000.0, 1))
 
         # ---- 5) 组装 prompt（请求级快照）----
         stage = "prompt"
         messages = prompt.build(persona, bundle, emotion, req.text, history)
+        live.emit("prompt",
+                  messages=len(messages),
+                  chars=sum(len(str(m.get("content") or "")) for m in messages))
         # 防复读：把上一轮回复的指纹写进 system，逼它换说法/正面答
         _anti_repeat(messages, history)
 
@@ -385,6 +411,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         tool_result: dict | None = None
         stage = "tool"
         try:
+            _t_tool = time.perf_counter()
             tool_hit = tools.detect(req.text)
             if tool_hit:
                 tool_result = await tools.run(
@@ -395,15 +422,22 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                     "role": "system",
                     "content": tools.prompt_block(tool_hit[0], tool_hit[1], tool_result),
                 })
+            live.emit("tool",
+                      name=(tool_hit[0] if tool_hit else ""),
+                      hit=bool(tool_hit),
+                      ok=bool(tool_result),
+                      ms=round((time.perf_counter() - _t_tool) * 1000.0, 1))
         except Exception:
             log.exception("工具调用失败（这一轮按普通回答走）")
             tool_result = None
+            live.emit("tool", name="", hit=False, ok=False, ms=0.0)
 
         # ---- 6) LLM 流式输出：逐 token + 按 sse_ping_interval 空闲插 ping ----
         # LLM 生成器跑在独立 task 里：ping 计时只 cancel Queue.get（安全），
         # 绝不会 cancel 正在产出 token 的生成器 / httpx 流。
         stage = "llm"
         agen = llm.stream(messages, effective_params)
+        live.emit("llm_start", messages=len(messages))
         queue: asyncio.Queue = asyncio.Queue()
         _END = object()
 
@@ -436,6 +470,11 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         head_buf: list[str] = []
         head_checked = not bool(prev_reply)
         retried = False
+        # 脑图打点：首个 token 的时刻、累计字数（每 24 字广播一次，别刷屏）
+        _t_llm = time.perf_counter()
+        _first_token = False
+        _chars = 0
+        _next_beat = 24
 
         async def _restart() -> None:
             """开头雷同时中止本次生成，删掉可抄的旧回复再重来一次（只重试一次）。"""
@@ -474,6 +513,14 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                 yield TurnEvent("ping")
                 continue
             if kind == "token":
+                _chars += len(str(payload))
+                if not _first_token:
+                    _first_token = True
+                    live.emit("first_token",
+                              ms=round((time.perf_counter() - _t_llm) * 1000.0, 1))
+                if _chars >= _next_beat:
+                    _next_beat = _chars + 24
+                    live.emit("tokens", chars=_chars)
                 if not head_checked:
                     head_buf.append(str(payload))
                     probe = "".join(head_buf)
@@ -553,6 +600,13 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             "event_id": event_id or 0,
             "truncated": False,
         })
+        live.emit("turn_done",
+                  ms=round((time.perf_counter() - started) * 1000.0, 1),
+                  chars=len(summary),
+                  emotion=emotion.label,
+                  intensity=float(emotion.intensity or 0),
+                  status="ok",
+                  card=str(card.get("kind") or "") if card else "")
 
         # ---- 8.5) 流结束后自动沉淀（后台线程，不阻塞 SSE）----
         # 存用户原话而非 AI 回复；门槛只过滤语气词，不看情绪强度 ——
@@ -580,6 +634,10 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
     except Exception as exc:
         # 任何下游异常 → error 后 return；与 done 互斥。
         final_status = "error"
+        live.emit("turn_error",
+                  code=_error_code(exc, stage),
+                  stage=stage,
+                  ms=round((time.perf_counter() - started) * 1000.0, 1))
         if not finished:
             yield TurnEvent("error", {
                 "code": _error_code(exc, stage),

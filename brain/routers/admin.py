@@ -17,8 +17,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import asyncio
+
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from brain import config_store
@@ -67,6 +70,28 @@ def _require_admin_token(
 
 
 router = APIRouter(prefix="/api/admin", dependencies=[Depends(_require_admin_token)])
+
+# ---- 实时脑图单独一个 router：EventSource 不能带自定义头，口令要允许走查询参数 ----
+live_router = APIRouter(prefix="/api/admin")
+
+
+def _require_admin_token_sse(
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    token: str | None = Query(default=None),
+) -> None:
+    expected = settings.ADMIN_TOKEN
+    if expected:
+        if not hmac.compare_digest(str(x_admin_token or token or ""), str(expected)):
+            raise HTTPException(status_code=401, detail="X-Admin-Token required or invalid")
+        return
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "")
+    if not _is_loopback(host):
+        raise HTTPException(
+            status_code=403,
+            detail="未配置 ADMIN_TOKEN：控制台只允许本机访问。",
+        )
 
 
 # ---- 出网脱敏：secret 字段的值一律置空（库里仍保留真值，链路照常可用）----
@@ -864,4 +889,54 @@ def list_logs(service: str = Query(default="", description="留空=只列清单�
             picked["lines"] = [f"[读日志失败] {type(exc).__name__}: {exc}"]
     result["current"] = picked["key"] if picked else ""
     return result
+
+
+# ---- 实时脑图：把这一轮真实走过的每一站推给控制台（同一进程内事件总线）----
+@live_router.get("/live/recent", dependencies=[Depends(_require_admin_token_sse)])
+def live_recent(limit: int = Query(default=40, ge=1, le=300)) -> dict[str, Any]:
+    """最近发生过的事件（页面刚打开时先补一段，避免一片空白）。"""
+    from brain.services import live
+
+    return {"items": live.recent(limit), "t": datetime.now().isoformat(timespec="seconds")}
+
+
+@live_router.get("/live/stream", dependencies=[Depends(_require_admin_token_sse)])
+async def live_stream(request: Request) -> StreamingResponse:
+    """SSE：先补历史，再持续推；15 秒没事件就发一次注释心跳（防代理掐断）。"""
+    from brain.services import live
+
+    async def _gen():
+        yield ": connected\n\n"
+        agen = live.subscribe()
+        try:
+            while True:
+                try:
+                    ev = await asyncio.wait_for(agen.__anext__(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    yield ": ping\n\n"
+                    continue
+                if await request.is_disconnected():
+                    break
+                yield live.sse_frame(ev)
+        except (asyncio.CancelledError, StopAsyncIteration):
+            raise
+        except Exception:
+            return
+        finally:
+            try:
+                await agen.aclose()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 

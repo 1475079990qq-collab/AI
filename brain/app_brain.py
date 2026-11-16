@@ -57,6 +57,13 @@ _LAN_ORIGIN_RE = (
 async def _lifespan(app: FastAPI):
     db.init_db()
     config_store.init_store()
+    # 脑图事件总线绑定当前事件循环：worker 线程（情感判断/记忆/GPT-SoVITS）也要能投递。
+    try:
+        from brain.services import live
+
+        live.bind_loop(asyncio.get_running_loop())
+    except Exception:
+        pass
     # 模型服务的体检放在启动器横幅里（brain.launch），这里不重复打印。
     task = asyncio.create_task(_proactive_loop())
     try:
@@ -80,6 +87,8 @@ app.include_router(chat.router)
 app.include_router(update.router)
 # 控制面（/api/admin/*）—— 已并入本进程，不再单独起 :8001
 app.include_router(admin.router)
+# 实时脑图 SSE（/api/admin/live/*）：与上面同前缀，但口令允许走查询参数
+app.include_router(admin.live_router)
 # 训练中心（/api/train/* + /train.html）—— 装什么、训什么由页面上自己点
 app.include_router(train.router)
 

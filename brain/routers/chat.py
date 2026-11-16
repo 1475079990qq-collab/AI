@@ -279,9 +279,18 @@ async def tts_endpoint(req: TTSRequest) -> Response:
     request_id = req.request_id or new_request_id()
     started = time.perf_counter()
     try:
+        from brain.services import live
+
+        live.emit("voice_start", chars=len(req.text or ""), emotion=req.emotion)
+    except Exception:
+        live = None
+    try:
         audio = await tts.synthesize(req.text, req.emotion, req.reference_audio_id)
     except Exception as exc:
         log.exception("tts synthesize failed")
+        if live is not None:
+            live.emit("voice_error", chars=len(req.text or ""),
+                      ms=round((time.perf_counter() - started) * 1000.0, 1))
         # 干净首句：去换行/压缩空白/截 160 字；code 保留旧字段兼容前端与冒烟。
         detail = " ".join(str(exc).replace("\r", " ").replace("\n", " ").split())
         for sep in ("。", "；", ";"):
@@ -300,6 +309,11 @@ async def tts_endpoint(req: TTSRequest) -> Response:
         len(req.text or ""), len(audio) // 1024,
         (time.perf_counter() - started), req.emotion, (req.text or "")[:24],
     )
+    if live is not None:
+        live.emit("voice_done", chars=len(req.text or ""),
+                  kb=round(len(audio) / 1024.0, 1),
+                  ms=round((time.perf_counter() - started) * 1000.0, 1),
+                  emotion=req.emotion)
     emo = str(req.emotion)
     try:
         emo.encode("latin-1")      # 响应头必须 latin-1 可编码，否则会 500
