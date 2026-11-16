@@ -842,6 +842,12 @@
       var r = await api('POST', '/api/admin/providers/' + encodeURIComponent(code) + '/test', {});
       var o = (r && typeof r === 'object') ? r : {};
       var ok = !!o.ok;
+      var detail = String(o.detailZh || o.detail || '');
+      // 运行方式是「已关闭」的服务，本来就不会去连——这不是故障，别用红色报失败吓人
+      if (detail.indexOf('已在控制台停用') >= 0) {
+        toast('未启用（运行方式=已关闭），没有测试 · 要用先把运行方式改掉', false);
+        return;
+      }
       var msg = (ok ? '✓ 连接正常' : '✗ 连接失败')
         + ' · ' + (o.latency_ms == null ? '-' : Number(o.latency_ms).toFixed(1)) + 'ms'
         + (o.detailZh ? ' · ' + o.detailZh : (o.detail ? ' · ' + o.detail : ''));
