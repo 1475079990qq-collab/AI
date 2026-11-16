@@ -8,7 +8,7 @@
 1. **默认 `BRAIN_MOCK=1`**：不装 Ollama / ONNX / Chroma / WIndexTTS，两条链路也必须能端到端跑通。任何外部依赖不可用一律降级，**绝不抛 500 打断对话**。
 2. **情感判断独立成层**，LLM 只负责生成有温度的回复，**禁止 LLM 输出情感标签**。
 3. **客户端零推理零记忆**：Web 与 Android 只做 UI、SSE 解析、音频播放。
-4. 严格按上一轮评审结论：判定结果**开流前同步落库**，流后只 update；控制平面与实时链路**进程级隔离**。
+4. 严格按上一轮评审结论：判定结果**开流前同步落库**，流后只 update；控制面与实时链路同进程部署，配置读写与事件落库仍分层负责。
 
 ## 1. 文件归属（写死，严禁越界）
 
@@ -26,13 +26,12 @@
 
 ```
 pip install -r requirements.txt
-python -m uvicorn brain.app_brain:app   --host 0.0.0.0 --port 8000   # 实时链路
-python -m uvicorn brain.app_console:app --host 0.0.0.0 --port 8001   # 控制平面
+python -u -m brain.launch all
 ```
 
-两个进程**只共享 `data/companion.db`**：控制平面只写配置/修正，实时链路只读配置 + 写事件。这是评审要求的进程级隔离，不是同应用挂两个路由。
-两个 app 都必须 `CORSMiddleware(allow_origins=["*"])`，都必须挂载 `web/` 静态目录。
-两个 app 启动时都调 `brain.db.init_db()`。
+单进程只起一个 **8000**：实时链路（`/chat` `/tts` `/asr`）与控制面（`/api/admin/*`）都在这个进程里，共用 `data/companion.db`——控制面写配置/修正，实时链路读配置 + 写事件。
+`brain/app_console.py` 已废弃为提示桩：不再挂载任何业务路由、也不写数据库，旧脚本误点时只回一句「控制台已并入大脑」的指引页。
+大脑 app 必须 `CORSMiddleware(allow_origins=["*"])`、挂载 `web/` 静态目录，启动时调 `brain.db.init_db()` 与 `config_store.init_store()`。
 
 ## 3. 共享模块（已实现，直接 import，不要重写）
 
@@ -98,7 +97,7 @@ MOCK 模式必须返回**真实可播放的 WAV 字节**（正弦波即可，时
 ### `GET /health`
 `{"status":"ok","mock":true,"llm":"mock|ollama","judge":"rule|onnx|mock","tts":"mock|http","memory":"sqlite|chroma","gpu":{...},"db":"ok"}`
 
-### 控制平面（:8001，前缀 `/api/admin`）
+### 控制平面（并入大脑进程 :8000，前缀 `/api/admin`）
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/admin/overview` | `db.stats()` + `/health` 代理结果 + 显存信息 |
@@ -167,7 +166,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
 
 ## 7. Web 前端约定（C）
 
-- `web/config.js`：按 `location.hostname` 推导 `BRAIN_URL = http://<host>:8000`、`CONSOLE_URL = http://<host>:8001`，允许 URL 参数 `?brain=...&console=...` 覆盖（手机局域网要用）。
+- `web/config.js`：按 `location.hostname` 推导 `BRAIN_URL = http://<host>:8000`、`CONSOLE_URL = http://<host>:8000`，允许 URL 参数 `?brain=...&console=...` 覆盖（手机局域网要用）。
 - `index.html` 对话页：`fetch` + `response.body.getReader()` 读流，**按 `\n\n` 缓冲切帧**（不能按 chunk 直接解码，中文会被切碎），逐 token 追加；`done` 才取 emotion 并异步 `POST /tts` 播放 `<audio>`；`error` 保留半句 + 重试按钮。
 - `admin.html` 控制台：人格模板编辑/启用、运行时参数、情感事件列表与修正、判断日志、GPU 状态；写操作带 `X-Admin-Token`。
 - 纯原生 HTML/CSS/JS，**不引入任何 CDN 依赖**（本地离线可用）；浅色主题，简洁。
