@@ -89,6 +89,12 @@ def build(persona: dict, bundle: dict, emotion: EmotionResult, text: str,
         id_lines = ["【身份｜最高优先级，与任何段落冲突时以本段为准】"]
         if assistant:
             id_lines.append(f"- 你叫「{assistant}」。别人怎么叫你、你怎么自称，都只用这个名字。")
+            # 记忆里可能还留着改名前的旧名字（那是对方当时的原话）。
+            # 小模型看到「你以前不叫 X」会顺手自报 X，这里先把这条堵死。
+            id_lines.append(
+                f"- 记忆或上下文里如果出现别的名字、旧名字（哪怕写的是「你以前叫 X」），"
+                f"你现在只叫「{assistant}」，不要自报旧名字，也不要解释改名经过。"
+            )
         if user_name:
             id_lines.append(f"- 对方叫「{user_name}」，可以直接叫他名字。")
         blocks.append("\n".join(id_lines))
