@@ -196,9 +196,10 @@ def collect() -> dict:
     procs = [
         ("大脑/控制台", brain_port, True),
         ("对话大模型", llm_port, True),
-        ("语音合成", tts_port, False),
         ("语音识别", asr_port, False),
     ]
+    # 语音合成已并进大脑（进程内），不再占 :8102；独立跑只用于调试
+    procs.append(("语音合成(进程内引擎)", -1, False))
     # 判断已改成进程内 onnx：这时不该再有 :8101 的独立进程，也不该去探它
     if judge_mode in ("onnx", "rule", "off"):
         procs.append((f"情感判断(进程内 {judge_mode})", -1, False))

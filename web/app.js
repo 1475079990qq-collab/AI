@@ -175,8 +175,103 @@
     bubble.appendChild(btn);
   }
 
-  function renderEmotion(emotion, intensity) {
-    var zh = EMOTION_ZH[emotion] || emotion || '平静';
+  // ---- 交付卡：它真的「递」一张过来（Web 与 App 同一套协议）----
+  function appendDeliverCard(bubble, evt) {
+    if (!bubble || bubble.querySelector('.deliver-card')) return;
+    var card = document.createElement('div');
+    card.className = 'deliver-card';
+    var title = document.createElement('div');
+    title.className = 'card-title';
+    title.textContent = evt.title || '给你的';
+    card.appendChild(title);
+
+    var items = evt.items || [];
+    for (var i = 0; i < items.length; i++) {
+      var row = document.createElement('div');
+      row.className = 'card-item';
+      var no = document.createElement('span');
+      no.className = 'card-no';
+      no.textContent = String(i + 1);
+      var tx = document.createElement('span');
+      tx.className = 'card-text';
+      tx.textContent = String(items[i] == null ? '' : items[i]);
+      row.appendChild(no);
+      row.appendChild(tx);
+      card.appendChild(row);
+    }
+    if (evt.note) {
+      var note = document.createElement('div');
+      note.className = 'card-note';
+      note.textContent = String(evt.note);
+      card.appendChild(note);
+    }
+    var rate = document.createElement('div');
+    rate.className = 'card-rate';
+    rate.appendChild(makeRateBtn(card, evt, '对了', 1));
+    rate.appendChild(makeRateBtn(card, evt, '不对', -1));
+    card.appendChild(rate);
+    bubble.appendChild(card);
+    if (stickToBottom) scrollToBottom();
+  }
+
+  function makeRateBtn(card, evt, label, verdict) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'card-rate-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', function () {
+      if (card.getAttribute('data-rated')) return;   // 只认第一次，避免来回改
+      card.setAttribute('data-rated', String(verdict));
+      var all = card.querySelectorAll('.card-rate-btn');
+      for (var i = 0; i < all.length; i++) all[i].classList.remove('picked');
+      btn.classList.add('picked');
+      postFeedback(evt, verdict, function (ok) {
+        if (!ok) {   // 发不出去就撤回勾，绝不假装记下了
+          card.removeAttribute('data-rated');
+          btn.classList.remove('picked');
+          appendSystemNotice('反馈没发出去，等会儿再点一次');
+        }
+      });
+    });
+    return btn;
+  }
+
+  function postFeedback(evt, verdict, done) {
+    var body = JSON.stringify({
+      request_id: evt.request_id || '',
+      verdict: verdict,
+      delivery_id: evt.delivery_id || 0,
+      target: evt.title || ''
+    });
+    fetch(resolveBrainUrl() + '/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body
+    }).then(function (r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    }).then(function () { if (done) done(true); })
+      .catch(function () { if (done) done(false); });
+  }
+
+  // 它自己先开的口：轮询拿一条，就当场显示成一条普通消息
+  function pollProactive() {
+    if (!userId) return;
+    fetch(resolveBrainUrl() + '/proactive?user_id=' + encodeURIComponent(userId),
+          { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var items = (d && d.items) || [];
+        for (var i = 0; i < items.length; i++) {
+          var bubble = appendAssistantBubble();
+          renderNow(bubble, String(items[i].text || ''));
+          markStreamingEnd(bubble);
+        }
+      })
+      .catch(function () { /* 主动开口失败不打扰用户 */ });
+  }
+
+  function renderEmotion(emotion, intensity) {    var zh = EMOTION_ZH[emotion] || emotion || '平静';
     $badge.textContent = (typeof intensity === 'number') ? (zh + ' · ' + intensity.toFixed(2)) : zh;
     $badge.setAttribute('data-emotion', emotion || 'neutral');
     $badge.title = 'emotion=' + (emotion || 'neutral');
@@ -346,6 +441,10 @@
           if (typeof evt.intensity === 'number') intensity = evt.intensity;
           renderEmotion(emotion, intensity);
           triggerTTS(fullText, emotion, requestId);
+          break;
+
+        case 'card':
+          appendDeliverCard(bubble, evt);   // 一张薄片：给了什么，一目了然
           break;
 
         case 'error':
@@ -737,6 +836,9 @@
     appendSystemNotice('输入一句话开始对话。');
     probeHealth();
     initMic();
+    // 它可能先开口：进来先问一次，之后每 5 分钟问一次
+    setTimeout(pollProactive, 1500);
+    setInterval(pollProactive, 5 * 60 * 1000);
 
     // 智能吸底：用户上滑看历史时 stickToBottom=false，不再被新 token 拽回底部
     $messages.addEventListener('scroll', function () {

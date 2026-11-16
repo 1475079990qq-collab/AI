@@ -70,14 +70,23 @@ def _kind_of(user_text: str, items: list[str]) -> str:
 
 
 def build(user_text: str, reply: str, emotion: str = "",
-          bundle: dict | None = None) -> dict | None:
+          bundle: dict | None = None, policy: dict | None = None) -> dict | None:
     """返回卡片 dict 或 None。
 
-    返回字段：kind / title / items / note —— 全部可直接序列化进 SSE。
+    policy 来自反馈统计（feedback_rules）：点过「不对」的那类先别出，
+    整体不对过半就把门槛抬高。没有 policy 时用默认值。
     """
     text = str(user_text or "").strip()
     body = str(reply or "").strip()
-    if len(body) < 24:
+    pol = policy or {}
+    try:
+        min_reply = int(pol.get("min_reply") or 24)
+        min_items = int(pol.get("min_items") or 2)
+    except (TypeError, ValueError):
+        min_reply, min_items = 24, 2
+    deny_kinds = set(pol.get("deny_kinds") or [])
+
+    if len(body) < min_reply:
         return None                       # 一句话的回复不配成卡
     if str(emotion or "") in _HEAVY_EMOTIONS:
         return None                       # 难受的时候先陪着，别递清单
@@ -85,11 +94,16 @@ def build(user_text: str, reply: str, emotion: str = "",
         return None                       # 不是「要东西」，只是闲聊
 
     items = _items_from(body)
-    if len(items) < 2:
-        return None                       # 摘不出两三条，就不是能用的东西
+    if len(items) < max(2, min_items):
+        return None                       # 摘不出够用的条目，就不是能用的东西
+
+    kind = _kind_of(text, items)
+    if kind in deny_kinds:
+        # 这一类被连着说「不对」：这轮先不出，宁可不给也别烦人
+        return None
 
     return {
-        "kind": _kind_of(text, items),
+        "kind": kind,
         "title": _clean_title(text),
         "items": items,
         "note": "从这一轮回答里摘的，方便你直接照着做",

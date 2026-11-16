@@ -648,6 +648,41 @@ def list_deliveries_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
         return _degraded(exc, items=[])
 
 
+@router.get("/tools")
+def list_tool_runs_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
+    """它最近真去办了哪些事（查了什么、记了什么）。"""
+    try:
+        from brain import db as database
+
+        rows = database.recent_tool_runs(limit=limit)
+        return {"items": rows, "total": len(rows)}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
+@router.get("/feedback-policy")
+def feedback_policy_route() -> Any:
+    """反馈学成了什么：哪类卡被压掉、门槛抬到几条。"""
+    try:
+        from brain.services import feedback_rules
+
+        return feedback_rules.compute()
+    except Exception as exc:
+        return _degraded(exc)
+
+
+@router.get("/proactive")
+def list_proactive_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
+    """它先开过哪些口，送到没有。"""
+    try:
+        from brain import db as database
+
+        rows = database.recent_proactive(limit=limit)
+        return {"items": rows, "total": len(rows)}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
 # ---- v2 · config audit ----
 @router.get("/config-audit")
 def list_config_audit_route(limit: int = Query(default=100, ge=1, le=1000)) -> Any:

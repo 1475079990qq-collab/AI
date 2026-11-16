@@ -778,6 +778,36 @@ def voices() -> dict:
     return {"voices": [p.stem for p in _voice_files()], "dir": settings.TTS_VOICE_DIR}
 
 
+def synth_inproc(payload: dict) -> bytes:
+    """进程内合成：大脑自己调，不再绕 :8102 一次 HTTP。
+
+    这是「一条链路一个实现」的落地：语音引擎只有这一份代码，
+    要么当独立服务跑（调试用），要么被大脑直接调用（正式链路）。
+
+    payload 与 /tts 的请求体同形（text/emotion/reference_audio_id/...），
+    这里复用同一套清洗、后端合成、去静音逻辑，避免两条路径声音不一样。
+    """
+    if _backend is None or not _state.get("ready"):
+        _load_backend()
+    if _backend is None or not _state.get("ready"):
+        raise RuntimeError(str(_state.get("error") or "tts backend not ready"))
+
+    raw = str(payload.get("text") or "").strip()
+    if not raw:
+        raise RuntimeError("text is empty")
+    text = _clean_text(raw)
+    if not _speakable(text):
+        raise RuntimeError("文本里没有可朗读的内容（只有表情或符号）")
+
+    fields = {k: v for k, v in payload.items() if k in TTSRequest.model_fields}
+    fields["text"] = text
+    req = TTSRequest(**fields)
+    audio = _backend.synth(req)
+    if not audio:
+        raise RuntimeError("synth returned empty")
+    return _trim_silence(audio)
+
+
 @app.post("/tts")
 def tts(req: TTSRequest):
     if not _state["ready"] or _backend is None:

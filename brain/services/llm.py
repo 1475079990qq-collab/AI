@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import AsyncIterator
 
 import httpx
 
 from brain.config import settings
+
+log = logging.getLogger("brain.llm")
 
 # 配置中心适配层（S1 新建）。未落地 / 任何异常一律降级回退原 settings 行为。
 try:
@@ -88,8 +91,9 @@ async def _ollama_stream(messages: list[dict], params: dict) -> AsyncIterator[st
     _api_style = str(cfg.get("api_style") or "openai")
     base_url = str(cfg.get("base_url") or settings.OLLAMA_BASE).rstrip("/")
     url = base_url + "/v1/chat/completions"
-    # fallback_model 作为主模型缺省时的备用
-    model = str(cfg.get("model") or cfg.get("fallback_model") or settings.LLM_MODEL)
+    # 主模型；__model_override 只由 stream() 的降级路径塞进来
+    model = str(params.get("__model_override") or cfg.get("model")
+                or cfg.get("fallback_model") or settings.LLM_MODEL)
     try:
         timeout_s = float(cfg.get("timeout_s") or 60.0)
     except (TypeError, ValueError):
@@ -162,7 +166,12 @@ async def _ollama_stream(messages: list[dict], params: dict) -> AsyncIterator[st
 
 
 async def stream(messages: list[dict], params: dict) -> AsyncIterator[str]:
-    """异步生成器：逐 token yield。只走真实模型服务，没有模拟分支。"""
+    """异步生成器：逐 token yield。只走真实模型服务，没有模拟分支。
+
+    fallback_model 现在是**真的备用**：主模型连不上 / 超时 / 报错，
+    且在还没吐出任何字之前，自动换备用模型再试一次。
+    （以前它只是「model 没配时的默认值」，OOM 了照样断，等于没有。）
+    """
     params = params or {}
     # 控制台里把「对话大模型」停用 = 明确告知没有这个能力，不再偷偷造假回复
     try:
@@ -174,5 +183,20 @@ async def stream(messages: list[dict], params: dict) -> AsyncIterator[str]:
         raise
     except Exception:
         pass
-    async for token in _ollama_stream(messages, params):
+
+    cfg = _cfg()
+    primary = str(cfg.get("model") or "").strip()
+    backup = str(cfg.get("fallback_model") or "").strip()
+    emitted = False
+    try:
+        async for token in _ollama_stream(messages, params):
+            emitted = True
+            yield token
+        return
+    except LLMUnavailable as exc:
+        # 已经吐过字就不能重来：换模型重生成会把前半句接成两段。
+        if emitted or not backup or backup == primary:
+            raise
+        log.warning("主模型 %s 失败（%s），改用备用模型 %s 重试一次", primary, exc, backup)
+    async for token in _ollama_stream(messages, {**params, "__model_override": backup}):
         yield token

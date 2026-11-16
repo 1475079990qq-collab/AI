@@ -156,6 +156,30 @@ CREATE TABLE IF NOT EXISTS deliveries (
     verdict    INTEGER DEFAULT 0     -- 0 没评 / 1 对了 / -1 不对
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_req ON deliveries(request_id);
+
+-- 它真去办了哪些事（查了什么、记了什么）。没有这张表，「工具层」就只是传说。
+CREATE TABLE IF NOT EXISTS tool_runs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    request_id TEXT,
+    user_id    TEXT,
+    tool       TEXT NOT NULL,
+    args       TEXT NOT NULL DEFAULT '',
+    ok         INTEGER NOT NULL DEFAULT 0,
+    summary    TEXT NOT NULL DEFAULT '',
+    ms         REAL NOT NULL DEFAULT 0
+);
+
+-- 它自己先开的口。主动开口必须有账：什么时候说的、说了什么、有没有被送到。
+CREATE TABLE IF NOT EXISTS proactive_msgs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    text         TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'care',
+    delivered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_proactive_user ON proactive_msgs(user_id, delivered_at);
 """
 
 
@@ -818,5 +842,111 @@ def recent_deliveries(limit: int = 50) -> list[dict]:
             "SELECT * FROM deliveries ORDER BY id DESC LIMIT ?", (int(limit),),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------- 工具层 ----------
+
+def add_tool_run(*, request_id: str, user_id: str, tool: str, args: str,
+                 ok: bool, summary: str, ms: float) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO tool_runs(created_at,request_id,user_id,tool,args,ok,summary,ms) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (_now(), str(request_id or ""), str(user_id or ""), str(tool or ""),
+             str(args or "")[:500], 1 if ok else 0, str(summary or "")[:500],
+             float(ms or 0)),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def recent_tool_runs(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM tool_runs ORDER BY id DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ---------- 主动开口 ----------
+
+def add_proactive(user_id: str, text: str, kind: str = "care") -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO proactive_msgs(created_at,user_id,text,kind) VALUES(?,?,?,?)",
+            (_now(), str(user_id or ""), str(text or ""), str(kind or "care")),
+        )
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def pending_proactive(user_id: str, limit: int = 3) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM proactive_msgs WHERE user_id=? AND delivered_at IS NULL "
+            "ORDER BY id ASC LIMIT ?", (str(user_id or ""), int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def mark_proactive_delivered(msg_id: int) -> None:
+    conn = connect()
+    try:
+        conn.execute("UPDATE proactive_msgs SET delivered_at=? WHERE id=?",
+                     (_now(), int(msg_id)))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def recent_proactive(limit: int = 50) -> list[dict]:
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM proactive_msgs ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()]
+    finally:
+        conn.close()
+
+
+def proactive_today_count(user_id: str) -> int:
+    """今天已经说出去几次（不管送没送到，只要生成过就算，避免反复生成）。"""
+    day = _now()[:10]
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM proactive_msgs WHERE user_id=? AND created_at >= ?",
+            (str(user_id or ""), day + " 00:00:00"),
+        ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def last_turn_at(user_id: str) -> str:
+    """最后一次真实对话的时间；没有返回空串。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT MAX(created_at) FROM turn_logs WHERE user_id=?", (str(user_id or ""),),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
     finally:
         conn.close()

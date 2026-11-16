@@ -1,5 +1,12 @@
-"""TTS：全部走真实语音服务（POST 配置地址取 wav）；失败直接报错，没有占位音。"""
+"""TTS：语音引擎已经并进大脑进程，这里只负责「把这句话变成 wav」。
+
+两种模式：
+  inproc（默认）  直接调 brain.tts_server 里的同一套引擎（不再占 :8102、不再多一次 HTTP）
+  http           只有把 base_url 指到「别的机器」时才用——比如语音跑在另一台设备上
+"""
 from __future__ import annotations
+
+import asyncio
 
 import httpx
 
@@ -83,19 +90,29 @@ def _endpoint(cfg: dict) -> str:
 
 
 def status(force: bool = False) -> dict:
-    """给 /health 用：语音服务是独立进程，这里只报告能不能连上。"""
-    try:
-        from brain.services import model_status
+    """给 /health 用：语音引擎现在跑在本进程里，直接查引擎状态。"""
+    cfg = _cfg()
+    mode = str(cfg.get("mode") or "inproc").strip().lower()
+    if mode == "http":
+        try:
+            from brain.services import model_status
 
-        remote = model_status.probe_tts(force=force)
-    except Exception:
-        remote = {"up": False, "detail": "probe failed"}
-    return {
-        "mode": "http",
-        "endpoint": _endpoint(_cfg()),
-        "up": bool(remote.get("up")),
-        "detail": str(remote.get("detail") or ""),
-    }
+            remote = model_status.probe_tts(force=force)
+        except Exception:
+            remote = {"up": False, "detail": "probe failed"}
+        return {"mode": "http", "endpoint": _endpoint(cfg),
+                "up": bool(remote.get("up")), "detail": str(remote.get("detail") or "")}
+    try:
+        from brain import tts_server
+
+        state = getattr(tts_server, "_state", {}) or {}
+        up = bool(state.get("ready"))
+        detail = "引擎已就绪" if up else str(state.get("error") or "引擎未加载（首次合成时加载）")
+        return {"mode": "inproc", "endpoint": "inproc://tts_server",
+                "up": up, "detail": detail}
+    except Exception as exc:
+        return {"mode": "inproc", "endpoint": "inproc://tts_server",
+                "up": False, "detail": f"引擎不可用：{type(exc).__name__}"}
 
 
 async def synthesize(text: str, emotion: str,
@@ -143,6 +160,16 @@ async def synthesize(text: str, emotion: str,
     headers: dict[str, str] = {}
     if cfg.get("api_key"):
         headers["Authorization"] = "Bearer " + str(cfg["api_key"])
+
+    # 默认进程内：同一套引擎、同一个进程，少一次 HTTP、少一个端口
+    if str(cfg.get("mode") or "inproc").strip().lower() != "http":
+        try:
+            from brain import tts_server
+
+            return await asyncio.to_thread(tts_server.synth_inproc, payload)
+        except Exception as exc:
+            raise RuntimeError(f"语音引擎合成失败：{exc}") from exc
+
     try:
         async with httpx.AsyncClient(timeout=timeout, headers=headers,
                                      trust_env=False) as client:

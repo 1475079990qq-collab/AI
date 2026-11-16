@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,25 @@ from fastapi.staticfiles import StaticFiles
 from brain import config_store, db
 from brain.config import settings
 from brain.routers import admin, chat, update
+
+# 主动开口的节流间隔：每 10 分钟看一次，该说才说（服务内部还有 3 小时/每天两次的限制）
+_PROACTIVE_INTERVAL_S = 600
+
+
+async def _proactive_loop() -> None:
+    """后台定时器：没人说话时，它自己开一次口。
+
+    放在大脑进程里而不是再起一个线程/进程：这条链路本来就是「一个进程一件事」，
+    主动开口也是同一件事的一部分——它只是「说」的另一个触发来源。
+    """
+    from brain.services import proactive
+
+    while True:
+        try:
+            await asyncio.to_thread(proactive.ticket)
+        except Exception:
+            pass
+        await asyncio.sleep(_PROACTIVE_INTERVAL_S)
 
 # 只允许本机与内网来源，不再用 "*"。
 # 为什么：浏览器里任何一个网页都能以 127.0.0.1 身份发起请求，
@@ -38,7 +58,11 @@ async def _lifespan(app: FastAPI):
     db.init_db()
     config_store.init_store()
     # 模型服务的体检放在启动器横幅里（brain.launch），这里不重复打印。
-    yield
+    task = asyncio.create_task(_proactive_loop())
+    try:
+        yield
+    finally:
+        task.cancel()
 
 
 app = FastAPI(title="companion", lifespan=_lifespan)

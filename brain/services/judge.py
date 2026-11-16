@@ -202,11 +202,15 @@ def _http_up(cfg: dict | None = None) -> bool:
 
 
 def _safe_log(*, result: EmotionResult, text: str, history: list[dict],
-              latency_ms: float) -> None:
-    """写判断日志；DB 未初始化 / 任何异常一律吞掉，绝不影响对话。"""
+              latency_ms: float, request_id: str = "") -> None:
+    """写判断日志；DB 未初始化 / 任何异常一律吞掉，绝不影响对话。
+
+    request_id 必须由调用方传进来（同一轮对话的那一个），
+    否则 judge_logs 与 turn_logs 永远对不上号，「这轮判错没判错」就查不回去。
+    """
     try:
         db.log_judge(
-            request_id=new_request_id(),
+            request_id=request_id or new_request_id(),
             input_text=text,
             context_text=json.dumps(history or [], ensure_ascii=False),
             output_label=result.label,
@@ -243,8 +247,11 @@ def _judge_cfg() -> dict:
                          "version", "updated_at", "fields"}
         }
         merged = dict(fallback)
+        # 白名单必须覆盖「代码里真正会读的所有键」：漏了哪个，控制台填了也不生效，
+        # 而且不报错——之前 endpoint / timeout_s / confidence_floor 就是这么消失的。
         for key in ("engine", "model_path", "context_turns", "confidence_as_intensity",
-                    "intensity_threshold", "label_map"):
+                    "intensity_threshold", "label_map", "endpoint", "timeout_s",
+                    "confidence_floor", "device"):
             if key in cfg:
                 merged[key] = cfg[key]
         merged["_fallback"] = False
@@ -377,14 +384,18 @@ def _ctx_history(history: list[dict], cfg: dict) -> list[dict]:
     return list(history or [])[-(2 * ct):]
 
 
-def judge(text: str, history: list[dict]) -> EmotionResult:
-    """同步判断情感：配置驱动引擎，任何不可用都降级到关键词规则。"""
+def judge(text: str, history: list[dict], request_id: str = "") -> EmotionResult:
+    """同步判断情感：配置驱动引擎，任何不可用都降级到关键词规则。
+
+    request_id 由 pipeline 传入，保证 judge_logs 能顺着它找回 turn_logs 那一轮。
+    """
     started = time.perf_counter()
     cfg = _judge_cfg()
     result = _decide(text, history, cfg)
     result = _apply_label_map(result, cfg.get("label_map"))
     _safe_log(result=result, text=text, history=_ctx_history(history, cfg),
-              latency_ms=(time.perf_counter() - started) * 1000.0)
+              latency_ms=(time.perf_counter() - started) * 1000.0,
+              request_id=request_id)
     return result
 
 

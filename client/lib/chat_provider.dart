@@ -86,6 +86,7 @@ class ChatProvider extends ChangeNotifier {
   ChatProvider(this._config) {
     serverUrl = _config.brainUrl;
     _client = SseClient(serverUrl);
+    startProactivePolling();
   }
 
   final AppConfig _config;
@@ -121,6 +122,38 @@ class ChatProvider extends ChangeNotifier {
 
   bool _cancelled = false;
   bool _disposed = false;
+
+  /// 主动开口的轮询定时器：它先说的话不是流的产物，只能问「有没有」。
+  Timer? _proactiveTimer;
+
+  /// 它可能先开口。启动 20 秒后问一次（让首批系统任务先跑完），之后每 5 分钟一次。
+  /// 说不说话由后端决定（静默时段 / 每天上限 / 刚聊过都不说），客户端不做判断。
+  void startProactivePolling() {
+    _proactiveTimer?.cancel();
+    _proactiveTimer = Timer.periodic(
+      const Duration(minutes: 5),
+      (_) => unawaited(pollProactive()),
+    );
+    Timer(const Duration(seconds: 20), () => unawaited(pollProactive()));
+  }
+
+  /// 问一次「它有没有先开口」。取走即标记已送达，不会重复弹。
+  Future<void> pollProactive() async {
+    if (_disposed || isStreaming) return;   // 正在对话时不插话
+    try {
+      final List<Map<String, dynamic>> items =
+          await _client.proactive(userId: _userId);
+      if (items.isEmpty) return;
+      for (final Map<String, dynamic> it in items) {
+        final String text = '${it['text'] ?? ''}'.trim();
+        if (text.isEmpty) continue;
+        messages.add(ChatMessage(role: 'assistant', text: text));
+      }
+      _safeNotify();
+    } catch (_) {
+      // 主动开口取不到就算了，绝不弹错误——它不该打断任何事
+    }
+  }
 
   /// 本轮收到的完整回复。先不进 UI——字幕要等语音开口那一刻才揭示，
   /// 否则字先刷完、声音在后面慢慢追，看起来就永远不同步。
@@ -569,6 +602,7 @@ class ChatProvider extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _cancelled = true;
+    _proactiveTimer?.cancel();
     _cardTimer?.cancel();
     unawaited(_audio.dispose());
     unawaited(_recorder.dispose());

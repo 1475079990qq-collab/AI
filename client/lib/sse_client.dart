@@ -230,6 +230,33 @@ class SseClient {
     }
   }
 
+  /// GET /proactive：取它「先开的口」。
+  ///
+  /// 取走即标记已送达（服务端负责），所以同一个 id 不会重复弹。
+  /// 任何失败都返回空列表：主动开口不该制造错误提示。
+  Future<List<Map<String, dynamic>>> proactive({String userId = 'u1'}) async {
+    final http.Client client = http.Client();
+    try {
+      final http.Response response = await client
+          .get(Uri.parse('$baseUrl/proactive?user_id=$userId'))
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return const <Map<String, dynamic>>[];
+      final Object? decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      final Object? items = decoded is Map ? decoded['items'] : null;
+      if (items is List) {
+        return items
+            .whereType<Map>()
+            .map((Map m) => Map<String, dynamic>.from(m))
+            .toList(growable: false);
+      }
+      return const <Map<String, dynamic>>[];
+    } catch (_) {
+      return const <Map<String, dynamic>>[];
+    } finally {
+      client.close();
+    }
+  }
+
   /// POST /tts，返回原始 WAV 字节；非 200 抛异常，由上层静默降级。
   Future<Uint8List> tts({
     required String text,

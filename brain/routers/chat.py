@@ -235,6 +235,37 @@ def feedback(body: FeedbackBody) -> JSONResponse:
     return JSONResponse(content={"ok": True, "kind": kind})
 
 
+@router.get("/proactive")
+def proactive_pending(user_id: str = "u1", force: int = 0) -> dict:
+    """取它「先开的口」。
+
+    客户端每隔几分钟问一次：有就显示成一条普通消息，取走即标记已送达，
+    不会重复弹。force=1 用于自测（绕过节流，直接生成一条）。
+    """
+    if force:
+        try:
+            from brain.services import proactive as proactive_svc
+
+            proactive_svc.ticket(user_id)
+        except Exception:
+            log.exception("主动开口生成失败")
+    try:
+        items = db.pending_proactive(user_id, limit=3)
+    except Exception:
+        log.exception("读取主动消息失败")
+        return {"items": []}
+    out = []
+    for it in items:
+        out.append({"id": int(it.get("id") or 0), "text": str(it.get("text") or ""),
+                    "kind": str(it.get("kind") or "care"),
+                    "created_at": str(it.get("created_at") or "")})
+        try:
+            db.mark_proactive_delivered(int(it.get("id") or 0))
+        except Exception:
+            pass
+    return {"items": out}
+
+
 @router.post("/tts")
 async def tts_endpoint(req: TTSRequest) -> Response:
     request_id = req.request_id or new_request_id()

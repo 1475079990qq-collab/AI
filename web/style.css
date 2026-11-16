@@ -884,3 +884,75 @@ textarea { resize: vertical; }
   .chart-row { grid-template-columns: 1fr; }
   .split { grid-template-columns: 1fr; }
 }
+
+/* ---- 交付卡：一张从墨滴里递出来的薄片 ---- */
+.deliver-card {
+  margin-top: 12px;
+  padding: 14px 16px 10px;
+  background: #fbfaf7;
+  border: 1px solid #e6e3dc;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,.03);
+}
+.deliver-card .card-title {
+  font-family: "Noto Serif SC", "Songti SC", Georgia, serif;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1d1d1f;
+  letter-spacing: .2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #ece9e2;
+  margin-bottom: 8px;
+}
+.deliver-card .card-item {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: #3a3a3c;
+}
+.deliver-card .card-no {
+  flex: 0 0 auto;
+  width: 18px; height: 18px;
+  margin-top: 2px;
+  border-radius: 50%;
+  background: #efede8;
+  color: #6b6b70;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.deliver-card .card-text { flex: 1 1 auto; }
+.deliver-card .card-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #8e8e93;
+}
+.deliver-card .card-rate {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #ece9e2;
+}
+.deliver-card .card-rate-btn {
+  border: 1px solid #ddd9d1;
+  background: #fff;
+  color: #6b6b70;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.deliver-card .card-rate-btn:hover { border-color: #c9c4b9; color: #1d1d1f; }
+.deliver-card .card-rate-btn.picked {
+  border-color: #b9d8bf;
+  background: #edfaf0;
+  color: #2c7a45;
+}
+.deliver-card[data-rated="-1"] .card-rate-btn.picked {
+  border-color: #f3cccc;
+  background: #fff0f0;
+  color: #b23a35;
+}

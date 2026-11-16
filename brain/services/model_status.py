@@ -105,12 +105,26 @@ def probe_judge(force: bool = False) -> dict[str, Any]:
 
 
 def probe_tts(force: bool = False) -> dict[str, Any]:
-    base = tts_base()
-    if not base:
-        return {"up": False, "status": 0, "detail": "未配置 TTS_BASE", "payload": {}}
-    if force:
-        _cache.pop("tts", None)
-    return _cached("tts", base + "/health")
+    """语音引擎已经并进大脑：不再探 :8102，直接看进程内引擎状态。
+
+    没加载权重不等于坏：引擎是首次合成时才加载，这里如实区分
+    「就绪」和「还没加载」，而不是把还没加载报成宕机。
+    """
+    try:
+        from brain import tts_server
+
+        state = getattr(tts_server, "_state", {}) or {}
+        ready = bool(state.get("ready"))
+        return {
+            "up": ready,
+            "status": 200 if ready else 0,
+            "detail": "引擎就绪（进程内）" if ready
+                      else f"引擎未加载（首次合成时加载）｜{state.get('error') or ''}",
+            "payload": {"backend": state.get("backend", ""), "calls": state.get("calls", 0)},
+        }
+    except Exception as exc:
+        return {"up": False, "status": 0, "detail": f"引擎不可用：{type(exc).__name__}",
+                "payload": {}}
 
 
 def probe_asr(force: bool = False) -> dict[str, Any]:

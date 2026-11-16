@@ -17,10 +17,10 @@ import logging
 import time
 from typing import AsyncIterator
 
-from brain import db
+from brain import db, tools
 from brain.config import settings
 from brain.schemas import ChatRequest, EmotionResult, TurnEvent, new_request_id
-from brain.services import judge, llm, memory, prompt
+from brain.services import feedback_rules, judge, llm, memory, prompt
 
 try:
     from brain import config_store
@@ -103,7 +103,7 @@ def _anti_repeat(messages: list[dict], history: list[dict] | None) -> None:
 
 # 复读判定：去掉标点后比开头 N 个字。2B 模型复读的特征就是开头一字不差。
 # 取 12 字：8 字太容易误伤「我觉得你说得对」这类正常开头，而重生成一次代价是延迟翻倍。
-_HEAD_LEN = 12
+_HEAD_LEN = 8
 _PUNCT = "，。！？,.!? \n\t“”\"'（）()…、；:：-—"
 
 
@@ -255,7 +255,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # ---- 1) 情感判断（同步函数丢线程池，避免阻塞事件循环）----
         stage = "judge"
         emotion: EmotionResult = (
-            await asyncio.to_thread(judge.judge, req.text, history)
+            await asyncio.to_thread(judge.judge, req.text, history, request_id)
         ).normalized()
 
         degraded = bool(emotion.degraded)
@@ -353,6 +353,27 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # 防复读：把上一轮回复的指纹写进 system，逼它换说法/正面答
         _anti_repeat(messages, history)
 
+        # ---- 5.5) 工具：要办的事，真去办（查 / 记 / 提醒）----
+        # 这一段是「嘴」和「手」的分界：以前它只能说说，现在能真查一条、真记一条。
+        # 工具结果以 system 消息插在主提示词之后，并明令「只用这些，不许编」。
+        tool_hit: tuple[str, str] | None = None
+        tool_result: dict | None = None
+        stage = "tool"
+        try:
+            tool_hit = tools.detect(req.text)
+            if tool_hit:
+                tool_result = await tools.run(
+                    tool_hit[0], tool_hit[1],
+                    user_id=req.user_id, request_id=request_id,
+                )
+                messages.insert(1, {
+                    "role": "system",
+                    "content": tools.prompt_block(tool_hit[0], tool_hit[1], tool_result),
+                })
+        except Exception:
+            log.exception("工具调用失败（这一轮按普通回答走）")
+            tool_result = None
+
         # ---- 6) LLM 流式输出：逐 token + 按 sse_ping_interval 空闲插 ping ----
         # LLM 生成器跑在独立 task 里：ping 计时只 cancel Queue.get（安全），
         # 绝不会 cancel 正在产出 token 的生成器 / httpx 流。
@@ -376,8 +397,10 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
 
         producer = asyncio.ensure_future(_produce(agen, queue))
         prev_reply = _prev_reply(history)
-        head_buf: list[str] = []          # 开头片段先扣着，判定完再决定放不放行
-        head_checked = False
+        # 没有上一轮可比时不必扣字：扣字只是为了防「开头照抄上一轮」，
+        # 首轮白扣 8 个字等于凭空多等一百多毫秒。
+        head_buf: list[str] = []
+        head_checked = not bool(prev_reply)
         retried = False
 
         async def _restart() -> None:
@@ -460,7 +483,10 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         try:
             from brain.services import deliver as deliver_svc
 
-            card = deliver_svc.build(req.text, summary, emotion.label, bundle)
+            card = deliver_svc.build(
+                req.text, summary, emotion.label, bundle,
+                policy=feedback_rules.policy(),
+            )
             if card:
                 delivery_id = db.add_delivery(
                     request_id=request_id,

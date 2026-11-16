@@ -113,12 +113,15 @@ _MODEL_SERVICES = [
         "name": "语音合成",
         "provider_code": "tts",
         "module": "brain.tts_server",
-        "mode_off_vals": ["off"],
+        # 已并入大脑进程：正式链路直接调进程内引擎，不再另起 :8102。
+        # 只有想单独调试语音时才手动跑 python -m brain.tts_server。
+        "skip_always": True,
+        "mode_off_vals": ["off", "inproc"],
         "port_attr": "TTS_PORT",
         "import": "httpx",
         "model_file_attr": None,
         "model_file_desc": "",
-        "hint": "GPT-SoVITS / IndexTTS 请单独启动，合成服务本身只是代理层",
+        "hint": "语音引擎已并入大脑（进程内），不再单独启动",
     },
 ]
 
@@ -164,6 +167,12 @@ def _check_model_services() -> tuple[list[dict], list[str]]:
 
     # ---- 模型服务检查 ----
     for svc in _MODEL_SERVICES:
+        if svc.get("skip_always"):
+            results.append({
+                "name": svc["name"], "port": getattr(settings, svc["port_attr"], 0),
+                "ok": True, "reason": "已并入大脑进程（不需要独立服务）", "skip": True,
+            })
+            continue
         mode = _get_provider_mode(svc["provider_code"])
         port = getattr(settings, svc["port_attr"], 0)
 
