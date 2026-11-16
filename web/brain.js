@@ -373,9 +373,9 @@
     var cx2 = W * 0.53, cy2 = H * 0.45, rx = W * 0.315, ry = H * 0.285;
     ctx.beginPath();
     ctx.ellipse(cx2, cy2, rx, ry, 0, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(86,150,140,.032)';
+    ctx.fillStyle = 'rgba(86,150,140,.055)';
     ctx.fill();
-    ctx.strokeStyle = 'rgba(120,200,185,.075)';
+    ctx.strokeStyle = 'rgba(120,200,185,.16)';
     ctx.lineWidth = 1;
     ctx.stroke();
     ctx.beginPath();
@@ -386,7 +386,7 @@
     ctx.restore();
 
     // 突触：冷线一次批量画，热线单独画，成本可控
-    ctx.strokeStyle = 'rgba(150,178,172,.085)';
+    ctx.strokeStyle = 'rgba(150,178,172,.16)';
     ctx.lineWidth = 0.75;
     ctx.beginPath();
     for (var e = 0; e < edges.length; e++) {
@@ -477,8 +477,8 @@
           ctx.fill();
         }
       } else {
-        // 静息神经元：能看见这一整片脑，但不喧宾夺主
-        ctx.fillStyle = 'rgba(186,210,205,' + ((active ? 0.09 : 0.16) + breath * 0.05) + ')';
+        // 静息神经元：整片脑要看得清（不然停止对话时几乎全黑），但不喧宾夺主
+        ctx.fillStyle = 'rgba(186,210,205,' + ((active ? 0.13 : 0.34) + breath * 0.06) + ')';
         ctx.beginPath();
         ctx.arc(n.x, n.y, n.size, 0, Math.PI * 2);
         ctx.fill();
