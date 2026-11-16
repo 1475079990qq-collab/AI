@@ -683,6 +683,18 @@ def list_proactive_route(limit: int = Query(default=50, ge=1, le=500)) -> Any:
         return _degraded(exc, items=[])
 
 
+@router.get("/tone-samples")
+def list_tone_samples_route(limit: int = Query(default=30, ge=1, le=500)) -> Any:
+    """你点过“对了”的回复（口吻语料）。只读，训练怎么用由训练中心决定。"""
+    try:
+        from brain import db as database
+
+        rows = database.list_tone_samples(limit=limit)
+        return {"items": rows, "total": len(rows)}
+    except Exception as exc:
+        return _degraded(exc, items=[])
+
+
 # ---- v2 · config audit ----
 @router.get("/config-audit")
 def list_config_audit_route(limit: int = Query(default=100, ge=1, le=1000)) -> Any:

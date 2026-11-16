@@ -16,7 +16,9 @@
   var EMOTION_LABELS = ['happy', 'sad', 'angry', 'surprised', 'fear', 'disgust', 'neutral', 'care'];
   var EMOTION_ZH = {
     happy: '开心', sad: '难过', angry: '生气', surprised: '惊讶',
-    fear: '害怕', disgust: '厌恶', neutral: '平静', care: '关切'
+    fear: '害怕', disgust: '厌恶', neutral: '平静', care: '关切',
+    anxious: '焦虑', excited: '兴奋', tired: '疲惫', lonely: '孤单',
+    hopeful: '期待', confused: '困惑', grateful: '感激', bored: '无聊'
   };
 
   // ---- 界面中文化 ----
@@ -900,7 +902,8 @@
       // ====== macOS 分组行渲染（快速参数可编辑） ======
       var html = list.map(function (p) {
         var cfg = p.config || {};
-        var enabled = parseInt(p.enabled || 1) === 1;
+        // 注意：enabled 可能是数字 0。"0 || 1" 会得到 1，把停用的服务画成启用。
+        var enabled = parseInt(p.enabled == null ? 1 : p.enabled, 10) === 1;
         var dotCls = enabled ? 'on' : 'off';
         var dotTitle = enabled ? '已启用' : '已停用';
         // 快速参数：engine / base_url / model 都显示为可编辑 input
@@ -1949,8 +1952,353 @@
     loadGpu();
   }
 
+  // ---------- 新板块：今天 / 流水 / 交付 / 工具 / 主动 / 语料 ----------
+  // 顶栏状态：不管当前停在哪个板块，一进来就说清“大脑在不在”
+  async function loadShellStatus() {
+    var dot = $('ct-dot'), sub = $('ct-sub');
+    try {
+      var ov = await api('GET', '/api/admin/overview');
+      var alive = !!(ov && ov.brain_health && ov.brain_health.reachable);
+      var h = (ov && ov.brain_health && (ov.brain_health.health || {})) || {};
+      var persona = ov && ov.active_persona && ov.active_persona.name;
+      if (dot) dot.className = 'ct-dot ' + (alive ? 'ok' : 'bad');
+      if (sub) {
+        // 只报“大脑在不在”和“当前人格”。大模型是否真连上，探测在模型服务页按“测试”才知道，
+        // 这里不拿配置值冒充连通性。
+        sub.textContent = alive
+          ? ('大脑在跑' + (persona ? ' · ' + persona : ''))
+          : '大脑没连上，先起服务';
+      }
+    } catch (e) {
+      if (dot) dot.className = 'ct-dot bad';
+      if (sub) sub.textContent = '状态读不到';
+    }
+  }
+
+  function agoText(ts) {
+    var t = Date.parse(String(ts || '').replace(' ', 'T'));
+    if (!t) return '';
+    var s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    if (s < 60) return '刚刚';
+    if (s < 3600) return Math.round(s / 60) + ' 分钟前';
+    if (s < 86400) return Math.round(s / 3600) + ' 小时前';
+    return Math.round(s / 86400) + ' 天前';
+  }
+
+  function shortTime(ts) { return String(ts || '').slice(5, 16); }
+
+  function verdictBadge(v) {
+    if (v === 1 || v === '1') return '<span class="vf vf-up">✓ 对了</span>';
+    if (v === -1 || v === '-1') return '<span class="vf vf-down">✗ 不对</span>';
+    return '<span class="vf vf-none">没点</span>';
+  }
+
+  function latencyBadge(ms) {
+    var n = Number(ms || 0);
+    var cls = n >= 5000 ? 'bad' : (n >= 3000 ? 'warn' : 'ok');
+    return '<span class="lat ' + cls + '">' + (n ? (n >= 1000 ? (n / 1000).toFixed(1) + 's' : Math.round(n) + 'ms') : '-') + '</span>';
+  }
+
+  function turnCard(t, verdictById) {
+    var id = String(t.request_id || '');
+    var v = verdictById[id];
+    var reply = String(t.reply_text || '');
+    var input = String(t.input_text || '');
+    return '<div class="turn-card">' +
+      '<div class="turn-head">' +
+        '<span class="turn-time">' + esc(shortTime(t.created_at)) + '</span>' +
+        '<span class="turn-emo">' + esc(EMOTION_ZH[t.emotion_label] || t.emotion_label || '平静') +
+          (t.intensity != null ? ' ' + esc(Number(t.intensity).toFixed(2)) : '') + '</span>' +
+        latencyBadge(t.latency_ms) +
+        (t.degraded ? '<span class="vf vf-warn">降级</span>' : '') +
+        (t.truncated ? '<span class="vf vf-warn">截断</span>' : '') +
+        verdictBadge(v) +
+      '</div>' +
+      '<div class="turn-in"><span class="turn-tag">你</span>' + esc(input || '（空）') + '</div>' +
+      '<div class="turn-out"><span class="turn-tag">它</span>' + esc(reply || '（没回）') + '</div>' +
+      (t.status && t.status !== 'ok' ? '<div class="turn-note">状态：' + esc(t.status) + ' · ' + esc(t.request_id || '') + '</div>' : '') +
+    '</div>';
+  }
+
+  async function feedbackMap() {
+    var map = {};
+    try {
+      var d = await api('GET', '/api/admin/feedback?limit=200');
+      asList(d).forEach(function (f) {
+        var rid = String(f.request_id || '');
+        if (!rid) return;
+        // kind: up / down（历史数据也出现过 1 / -1）
+        var k = String(f.kind || '').toLowerCase();
+        map[rid] = (k === 'up' || k === '1' || k === 'yes' || k === 'good') ? 1 :
+          ((k === 'down' || k === '-1' || k === 'bad') ? -1 : 0);
+      });
+      asList(d).forEach(function (f) {
+        if (String(f.target || '') === 'delivery' && f.request_id) {
+          map['d:' + f.request_id] = String(f.kind || '').toLowerCase().indexOf('up') === 0 ? 1 : -1;
+        }
+      });
+    } catch (e) { /* 反馈读不到不影响流水 */ }
+    return map;
+  }
+
+  async function loadToday() {
+    var kpiEl = $('today-kpi'), svcEl = $('today-services'), todoEl = $('today-todo'), recEl = $('today-recent');
+    loadShellStatus();
+    var stats = {}, health = {}, deliveryRows = [], toolRows = [], fb = {}, train = {};
+    try {
+      var ov = await api('GET', '/api/admin/overview');
+      stats = (ov && (ov.stats || ov.db)) || {};
+      health = (ov && (ov.brain_health && (ov.brain_health.health || ov.brain_health))) || {};
+    } catch (e) {
+      stats = {};
+      health = {};
+    }
+    try { fb = await feedbackMap(); } catch (e) { fb = {}; }
+    try { deliveryRows = asList(await api('GET', '/api/admin/deliveries?limit=100')); } catch (e) {}
+    try { toolRows = asList(await api('GET', '/api/admin/tools?limit=100')); } catch (e) {}
+    try { train = await api('GET', '/api/train/status'); } catch (e) { train = {}; }
+
+    var turns = pick(stats, ['turns', 'total_turns']);
+    var avg = pick(stats, ['avg_latency_ms', 'avg_latency']);
+    var up = 0, down = 0;
+    Object.keys(fb).forEach(function (k) { if (fb[k] === 1) up++; if (fb[k] === -1) down++; });
+    var samples = Number(train.samples || 0);
+    var unrated = deliveryRows.filter(function (d) { return !d.verdict; }).length;
+
+    if (kpiEl) {
+      kpiEl.innerHTML =
+        kpiCard('累计轮次', turns == null ? '-' : turns, '记忆里总共这么多轮') +
+        kpiCard('平均延迟', avg == null ? '-' : Math.round(avg), '毫秒 / 轮（累计）') +
+        kpiCard('评过', up + down, '✓ ' + up + ' · ✗ ' + down) +
+        kpiCard('口吻语料', samples, samples >= 200 ? '够训一版 LoRA' : ('攒够 200 条能训一版，现在 ' + samples + ' 条'), samples >= 200 ? 'ok' : 'muted');
+    }
+
+    // 服务一览：只报“能不能用”，不堆技术名词
+    var provMap = {};
+    try {
+      var pl = asList(await api('GET', '/api/admin/providers'));
+      pl.forEach(function (p) { provMap[String(p.code || '')] = p; });
+    } catch (e) { provMap = {}; }
+    function svc(name, ok, note) {
+      return '<div class="svc ' + (ok ? 'ok' : 'off') + '">' +
+        '<i class="svc-dot"></i><span class="svc-name">' + esc(name) + '</span>' +
+        '<span class="svc-note">' + esc(note || '') + '</span></div>';
+    }
+    if (svcEl) {
+      var llm = provMap.llm || {};
+      var llmOk = String(health.llm || '') === 'http';
+      var ttsRaw = String(health.tts || '');
+      var ttsLabel = ttsRaw === 'inproc' ? '进程内引擎' : (ttsRaw || '未加载');
+      svcEl.innerHTML =
+        svc('大脑', String(health.status || '').toLowerCase() === 'ok', '进程内') +
+        svc('对话大模型', llmOk, llm.model || '') +
+        svc('情感判断', String(health.judge || '') === 'onnx', '进程内 onnx') +
+        svc('语音合成', !!ttsRaw, ttsLabel);
+    }
+
+    // 待你处理：只列真会影响体验的事
+    if (todoEl) {
+      var items = [];
+      if (samples === 0) items.push(['还没有口吻语料', '去对话页点几个 ✓，它说的话才会越攒越像你想要的', 'quality']);
+      if (down > 0 && down >= up) items.push(['被判“不对”的比“对了”多', '先看几条 ✗ 的回复，多半是客服腔或没接住情绪', 'quality']);
+      if (unrated > 0) items.push([unrated + ' 张交付卡还没评', '没评的卡等于白给，模型学不到', 'deliveries']);
+      if (!toolRows.length) items.push(['它还没用过任何工具', '问一句“帮我查一下…”或“记一下…”，这里就会出现工具账', 'tools']);
+      if (train && train.torch && train.torch.cuda === false) items.push(['训练环境缺 CUDA', '现在只有 CPU torch，真训会很慢；训练中心里能看到装什么', 'tone']);
+      if (!items.length) items.push(['暂时没有要处理的', '该记的记了、该点的点了，去聊两句也行', 'quality']);
+      todoEl.innerHTML = items.slice(0, 5).map(function (it) {
+        return '<button type="button" class="todo-item" data-goto="' + esc(it[2]) + '">' +
+          '<span class="todo-t">' + esc(it[0]) + '</span>' +
+          '<span class="todo-s">' + esc(it[1]) + '</span></button>';
+      }).join('');
+      todoEl.querySelectorAll('[data-goto]').forEach(function (b) {
+        b.addEventListener('click', function () { switchSection(b.getAttribute('data-goto')); });
+      });
+    }
+
+    // 最近三句：给“它说得像不像人”一个立刻能看的位置
+    if (recEl) {
+      try {
+        var tl = asList(await api('GET', '/api/admin/turn-logs?limit=3'));
+        recEl.innerHTML = tl.length ? tl.map(function (t) {
+          return '<div class="mini-turn"><div class="mt-in">' + esc(String(t.input_text || '').slice(0, 60)) + '</div>' +
+            '<div class="mt-out">' + esc(String(t.reply_text || '（没回）').slice(0, 120)) + '</div></div>';
+        }).join('') : '<div class="empty">还没有对话</div>';
+      } catch (e) { recEl.innerHTML = '<div class="empty">加载失败</div>'; }
+    }
+  }
+
+  async function loadQuality() {
+    var listEl = $('quality-list'), sumEl = $('quality-summary');
+    var q = (($('quality-filter') || {}).value || '').trim();
+    var limit = Number((($('quality-range') || {}).value) || 60);
+    try {
+      var rows = asList(await api('GET', '/api/admin/turn-logs?limit=' + limit));
+      var fb = await feedbackMap();
+      var shown = rows;
+      if (q) {
+        var low = q.toLowerCase();
+        shown = rows.filter(function (t) {
+          return (String(t.input_text || '') + ' ' + String(t.reply_text || '')).toLowerCase().indexOf(low) >= 0;
+        });
+      }
+      var lat = shown.map(function (t) { return Number(t.latency_ms || 0); }).sort(function (a, b) { return a - b; });
+      var p50 = lat.length ? lat[Math.floor(lat.length / 2)] : 0;
+      var slow = lat.filter(function (n) { return n >= 5000; }).length;
+      var downs = 0, ups = 0;
+      shown.forEach(function (t) {
+        var v = fb[String(t.request_id || '')];
+        if (v === 1) ups++; if (v === -1) downs++;
+      });
+      if (sumEl) {
+        sumEl.innerHTML = '<span class="qs">共 <b>' + shown.length + '</b> 条</span>' +
+          '<span class="qs">中位 <b>' + (p50 >= 1000 ? (p50 / 1000).toFixed(1) + 's' : Math.round(p50) + 'ms') + '</b></span>' +
+          '<span class="qs ' + (slow ? 'warn' : '') + '">超 5 秒 <b>' + slow + '</b> 条</span>' +
+          '<span class="qs">✓ <b>' + ups + '</b> · ✗ <b class="' + (downs ? 'bad' : '') + '">' + downs + '</b></span>';
+      }
+      if (listEl) {
+        listEl.innerHTML = shown.length ? shown.map(function (t) { return turnCard(t, fb); }).join('')
+          : '<div class="empty">' + (q ? '没搜到包含「' + esc(q) + '」的对话' : '还没有对话记录') + '</div>';
+      }
+    } catch (e) {
+      if (sumEl) sumEl.innerHTML = '';
+      if (listEl) renderError(listEl, e);
+    }
+  }
+
+  async function loadDeliveries() {
+    var listEl = $('deliveries-list'), polEl = $('policy-box');
+    try {
+      var policy = await api('GET', '/api/admin/feedback-policy');
+      if (polEl) {
+        var deny = (policy && (policy.deny_kinds || policy.deny)) || [];
+        var allow = (policy && (policy.allow_kinds || policy.allow)) || [];
+        polEl.innerHTML = '<div class="sub-card-head">反馈学成了什么</div>' +
+          '<div class="policy-grid">' +
+            '<div><span class="muted">被压掉的类型</span><div class="policy-v">' + (deny.length ? deny.map(esc).join('、') : '无') + '</div></div>' +
+            '<div><span class="muted">更愿意给的</span><div class="policy-v">' + (allow.length ? allow.map(esc).join('、') : '无') + '</div></div>' +
+            '<div><span class="muted">已评 / 好 / 差</span><div class="policy-v">' +
+              esc(policy && policy.rated != null ? policy.rated : '-') + ' / ' +
+              esc(policy && policy.good != null ? policy.good : '-') + ' / ' +
+              esc(policy && policy.bad != null ? policy.bad : '-') + '</div></div>' +
+            '<div><span class="muted">最少几条才作数</span><div class="policy-v">' + esc(policy && policy.min_items != null ? policy.min_items : '-') + '</div></div>' +
+            '<div><span class="muted">最短回复字数</span><div class="policy-v">' + esc(policy && policy.min_reply != null ? policy.min_reply : '-') + '</div></div>' +
+          '</div>' +
+          '<p class="hint" style="margin:10px 0 0">这些是从你点的 ✓/✗ 里自动算出来的（窗口 ' +
+            esc((policy && policy.window) || 40) + ' 条），不是你手填的；评得太少它不会乱改。</p>';
+      }
+    } catch (e) {
+      if (polEl) polEl.innerHTML = '<div class="empty error-text">反馈策略读取失败：' + esc(e && e.message ? e.message : e) + '</div>';
+    }
+    try {
+      var rows = asList(await api('GET', '/api/admin/deliveries?limit=100'));
+      if (!listEl) return;
+      if (!rows.length) {
+        listEl.innerHTML = '<div class="empty">还没有递出去的卡。它给你“能用的东西”（清单、步骤、链接）时会出现在这里。</div>';
+        return;
+      }
+      listEl.innerHTML = rows.map(function (d) {
+        var body = '';
+        try {
+          var b = typeof d.body === 'string' ? JSON.parse(d.body) : d.body;
+          if (b && b.items) body = '<ul class="dv-items">' + b.items.slice(0, 6).map(function (x) {
+            return '<li>' + esc(typeof x === 'string' ? x : (x.title || x.text || JSON.stringify(x))) + '</li>';
+          }).join('') + '</ul>';
+          else if (b && b.summary) body = '<div class="muted">' + esc(String(b.summary).slice(0, 200)) + '</div>';
+        } catch (err) { body = '<div class="muted">' + esc(String(d.body || '').slice(0, 200)) + '</div>'; }
+        return '<div class="dv-card ' + (d.verdict === 1 ? 'up' : (d.verdict === -1 ? 'down' : '')) + '">' +
+          '<div class="dv-head"><b>' + esc(d.title || d.kind || '交付卡') + '</b>' + verdictBadge(d.verdict) +
+            '<span class="muted dv-time">' + esc(shortTime(d.created_at)) + '</span></div>' + body + '</div>';
+      }).join('');
+    } catch (e) {
+      if (listEl) renderError(listEl, e);
+    }
+  }
+
+  async function loadTools() {
+    var el = $('tools-list');
+    try {
+      var rows = asList(await api('GET', '/api/admin/tools?limit=100'));
+      if (!rows.length) {
+        el.innerHTML = '<div class="empty">还没有工具记录。试着让它“查一下今天的新闻”或“记一下我明天下午要交材料”。</div>';
+        return;
+      }
+      el.innerHTML = '<table class="data-table"><thead><tr><th>时间</th><th>工具</th><th>参数</th><th>结果</th><th>耗时</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td class="muted">' + esc(shortTime(r.created_at)) + '</td>' +
+            '<td><b>' + esc(r.tool || '') + '</b></td>' +
+            '<td class="cell-ellipsis" title="' + esc(r.args || '') + '">' + esc(String(r.args || '').slice(0, 80)) + '</td>' +
+            '<td>' + (r.ok ? '<span class="vf vf-up">成功</span>' : '<span class="vf vf-down">失败</span>') +
+              ' <span class="muted">' + esc(String(r.summary || '').slice(0, 80)) + '</span></td>' +
+            '<td class="muted">' + (r.ms ? Math.round(r.ms) + 'ms' : '-') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    } catch (e) { renderError(el, e); }
+  }
+
+  async function loadProactive() {
+    var el = $('proactive-list'), gateEl = $('proactive-gate');
+    try {
+      var rows = asList(await api('GET', '/api/admin/proactive?limit=100'));
+      if (gateEl) {
+        var today = rows.filter(function (r) { return String(r.created_at || '').slice(0, 10) === new Date().toISOString().slice(0, 10); }).length;
+        gateEl.innerHTML = '<div class="sub-card-head">闸门</div><div class="policy-grid">' +
+          '<div><span class="muted">安静时段</span><div class="policy-v">22:00 – 8:00 不主动</div></div>' +
+          '<div><span class="muted">每天上限</span><div class="policy-v">2 次（今天已 ' + today + '）</div></div>' +
+          '<div><span class="muted">闲置多久才开口</span><div class="policy-v">3 小时</div></div>' +
+          '<div><span class="muted">给谁</span><div class="policy-v">固定 u1（只有你）</div></div></div>';
+      }
+      if (!rows.length) {
+        el.innerHTML = '<div class="empty">它还没主动找过你。闲置 3 小时以上、不在 22:00–8:00，它就会先开口。</div>';
+        return;
+      }
+      el.innerHTML = '<table class="data-table"><thead><tr><th>时间</th><th>它先说的</th><th>类型</th><th>送到没</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td class="muted">' + esc(shortTime(r.created_at)) + '</td>' +
+            '<td>' + esc(String(r.text || '').slice(0, 120)) + '</td>' +
+            '<td class="muted">' + esc(r.kind || '') + '</td>' +
+            '<td>' + (r.delivered_at ? '<span class="vf vf-up">已送到</span>' : '<span class="vf vf-none">没送</span>') + '</td></tr>';
+        }).join('') + '</tbody></table>';
+    } catch (e) { renderError(el, e); }
+  }
+
+  async function loadTone() {
+    var kpiEl = $('tone-stats'), listEl = $('tone-samples');
+    try {
+      var st = await api('GET', '/api/train/status');
+      var samples = Number(st.samples || 0);
+      var ds = st.dataset || {};
+      var torch = st.torch || {};
+      if (kpiEl) {
+        kpiEl.innerHTML =
+          kpiCard('口吻语料', samples, samples >= 200 ? '够训一版' : '差 ' + Math.max(0, 200 - samples) + ' 条', samples >= 200 ? 'ok' : 'muted') +
+          kpiCard('训练集', (ds.train || 0) + ' / ' + (ds.valid || 0), 'train / valid 行数') +
+          kpiCard('算力', torch.cuda ? 'GPU 可用' : '仅 CPU', torch.cuda ? '' : '真训会很慢（缺 CUDA torch）', torch.cuda ? 'ok' : 'warn') +
+          kpiCard('可训底座', (st.models || []).length, 'HF 格式的底座数量', (st.models || []).length ? 'ok' : 'warn');
+      }
+      var rows = asList(await api('GET', '/api/admin/tone-samples?limit=30'));
+      if (!rows.length) {
+        listEl.innerHTML = '<div class="empty">还没攒到语料。去对话页点几个 ✓，这里就会出现“你一句、它一句”的原样记录。</div>';
+      } else {
+        listEl.innerHTML = '<table class="data-table"><thead><tr><th>时间</th><th>你说的</th><th>它回的（原样存）</th></tr></thead><tbody>' +
+          rows.map(function (r) {
+            return '<tr><td class="muted">' + esc(shortTime(r.created_at)) + '</td>' +
+              '<td class="cell-ellipsis">' + esc(String(r.input_text || '').slice(0, 80)) + '</td>' +
+              '<td>' + esc(String(r.reply_text || '').slice(0, 160)) + '</td></tr>';
+          }).join('') + '</tbody></table>';
+      }
+    } catch (e) {
+      if (kpiEl) kpiEl.innerHTML = '';
+      if (listEl) renderError(listEl, e);
+    }
+  }
+
   // ---------- 板块调度 ----------
   var LOADERS = {
+    today: loadToday,
+    quality: loadQuality,
+    deliveries: loadDeliveries,
+    tools: loadTools,
+    proactive: loadProactive,
+    tone: loadTone,
     overview: loadOverview,
     personas: loadPersonas,
     providers: loadProviders,
@@ -2008,10 +2356,9 @@
     LOADERS[name]();
   }
 
-  // 顶部按钮：只刷当前板块 + 概览
+  // 顶部按钮：刷新当前板块（概览只在它自己可见时才刷，避免无谓请求）
   function refreshAll() {
-    if (currentSection && currentSection !== 'overview' && LOADERS[currentSection]) LOADERS[currentSection]();
-    loadOverview();
+    if (currentSection && LOADERS[currentSection]) LOADERS[currentSection]();
   }
 
   function fillEmotionSelect(el, withEmpty) {
@@ -2110,9 +2457,18 @@
     // 会话明细
     $('turn-logs-refresh').addEventListener('click', loadTurnLogs);
 
-    // 默认显示概览；地址栏带 #板块名 时直接打开那一块
+    // 对话流水：搜索 / 条数 / 查询
+    if ($('quality-query')) $('quality-query').addEventListener('click', loadQuality);
+    if ($('quality-filter')) $('quality-filter').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') loadQuality();
+    });
+
+    // 顶栏状态先亮起来，再进具体板块
+    loadShellStatus();
+
+    // 默认打开「今日看板」；地址栏带 #板块名 时直接打开那一块
     var start = (location.hash || '').replace('#', '');
-    switchSection(LOADERS[start] ? start : 'overview');
+    switchSection(LOADERS[start] ? start : 'today');
   }
 
   if (document.readyState === 'loading') {

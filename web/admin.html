@@ -3,58 +3,78 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>情感陪伴 · 设置</title>
+<title>情感陪伴 · 控制台</title>
 <link rel="stylesheet" href="admin.css">
+<link rel="stylesheet" href="console.css">
 </head>
 <body class="page-admin">
 
 <div id="toast" class="toast" role="status"></div>
 
+<div class="console-top">
+  <div class="ct-brand">
+    <span class="ct-dot" id="ct-dot"></span>
+    <span class="ct-title">情感陪伴 · 控制台</span>
+    <span class="ct-sub" id="ct-sub">正在读取状态…</span>
+  </div>
+  <div class="ct-actions">
+    <a class="btn btn-ghost btn-mini" id="chat-link" href="index.html" target="_blank">对话页 ↗</a>
+    <a class="btn btn-ghost btn-mini" href="train.html" target="_blank">训练中心 ↗</a>
+    <button type="button" class="btn btn-primary btn-mini" id="refresh-all">刷新全部</button>
+  </div>
+</div>
+
 <div class="admin-layout">
-  <!-- ======= 左侧栏：5 组 ======= -->
+  <!-- ======= 左侧栏：按「你要做什么」分组 ======= -->
   <nav class="admin-nav" id="admin-nav">
-    <div class="nav-title">情感陪伴 · 控制台</div>
+    <div class="nav-title">今天</div>
 
-    <div class="nav-group" data-group="home">
-      <div class="nav-group-head">总览</div>
+    <div class="nav-group" data-group="today">
+      <div class="nav-group-head">每天先看这里</div>
       <div class="nav-group-items">
-        <button type="button" class="nav-item active" data-section="overview">运行概览</button>
+        <button type="button" class="nav-item active" data-section="today">今日看板</button>
+        <button type="button" class="nav-item" data-section="quality">对话流水</button>
+        <button type="button" class="nav-item" data-section="overview">运行概览</button>
       </div>
     </div>
 
-    <div class="nav-group" data-group="agent">
-      <div class="nav-group-head">对话与人设</div>
+    <div class="nav-group" data-group="voice">
+      <div class="nav-group-head">它怎么说话</div>
       <div class="nav-group-items">
-        <button type="button" class="nav-item" data-section="personas">人格模板</button>
+        <button type="button" class="nav-item" data-section="personas">人格与口吻</button>
         <button type="button" class="nav-item" data-section="params">对话参数</button>
-      </div>
-    </div>
-
-    <div class="nav-group" data-group="models">
-      <div class="nav-group-head">模型与语音</div>
-      <div class="nav-group-items">
-        <button type="button" class="nav-item" data-section="providers">模型服务</button>
         <button type="button" class="nav-item" data-section="tts">声音</button>
-        <button type="button" class="nav-item" data-section="knowledge">知识库</button>
       </div>
     </div>
 
-    <div class="nav-group" data-group="data">
-      <div class="nav-group-head">记忆与数据</div>
+    <div class="nav-group" data-group="memory">
+      <div class="nav-group-head">它记得什么</div>
       <div class="nav-group-items">
-        <button type="button" class="nav-item" data-section="sessions">会话记录</button>
         <button type="button" class="nav-item" data-section="facts">事实记忆</button>
-        <button type="button" class="nav-item" data-section="emotions">情感事件</button>
-        <button type="button" class="nav-item" data-section="logs">判断记录</button>
-        <button type="button" class="nav-item" data-section="audit">改动记录</button>
+        <button type="button" class="nav-item" data-section="emotions">情绪事件</button>
+        <button type="button" class="nav-item" data-section="sessions">会话与快照</button>
+      </div>
+    </div>
+
+    <div class="nav-group" data-group="give">
+      <div class="nav-group-head">它给了什么</div>
+      <div class="nav-group-items">
+        <button type="button" class="nav-item" data-section="deliveries">交付与勾叉</button>
+        <button type="button" class="nav-item" data-section="tools">工具调用</button>
+        <button type="button" class="nav-item" data-section="proactive">主动开口</button>
+        <button type="button" class="nav-item" data-section="tone">语料与训练</button>
       </div>
     </div>
 
     <div class="nav-group" data-group="ops">
-      <div class="nav-group-head">系统运维</div>
+      <div class="nav-group-head">出问题查这里</div>
       <div class="nav-group-items">
+        <button type="button" class="nav-item" data-section="providers">模型服务</button>
+        <button type="button" class="nav-item" data-section="logs">判断记录</button>
         <button type="button" class="nav-item" data-section="runlogs">服务日志</button>
         <button type="button" class="nav-item" data-section="system">系统与显卡</button>
+        <button type="button" class="nav-item" data-section="audit">改动记录</button>
+        <button type="button" class="nav-item" data-section="knowledge">知识库（工具）</button>
       </div>
     </div>
   </nav>
@@ -62,43 +82,66 @@
   <!-- ======= 右侧内容 ======= -->
   <div class="admin-content">
 
-    <!-- 概览 -->
-    <section class="panel active" data-panel="overview">
+    <!-- 今日看板 -->
+    <section class="panel active" data-panel="today">
       <div class="card-head">
-        <h2>运行概览</h2>
-        <a class="btn btn-ghost btn-mini" href="index.html" target="_blank">对话页 ↗</a>
-        <button type="button" class="btn btn-ghost btn-mini" data-refresh="overview">刷新</button>
-      </div>
-      <p class="hint">对话轮次、情绪分布、延迟走势与各服务状态。</p>
-      <div id="overview-kpi" class="kpi-grid"></div>
-      <div id="overview-statusbar" class="status-bar"></div>
-      <div class="chart-row">
-        <div class="chart-card">
-          <div class="chart-title">情绪分布 <span class="muted" id="chart-emotion-total"></span></div>
-          <div id="chart-emotion" class="chart-body"></div>
+        <div>
+          <h2>今日看板</h2>
+          <p class="hint">今天聊了多少、快不快、它说得对不对，以及需要你处理的几件事。</p>
         </div>
-        <div class="chart-card">
-          <div class="chart-title">近期延迟 <span class="muted" id="chart-latency-meta"></span></div>
-          <div id="chart-latency" class="chart-body"></div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="today">刷新</button>
+      </div>
+      <div id="today-kpi" class="kpi-grid"></div>
+      <div id="today-services" class="console-services"></div>
+      <div class="split wide-left">
+        <div class="sub-card">
+          <div class="sub-card-head">待你处理</div>
+          <div id="today-todo"></div>
+        </div>
+        <div class="sub-card">
+          <div class="sub-card-head">最近三句</div>
+          <div id="today-recent"></div>
         </div>
       </div>
-      <h3 class="sub">服务状态</h3>
-      <div id="overview-providers" class="provider-status-grid"></div>
     </section>
 
-    <!-- 人格模板 -->
+    <!-- 对话流水 -->
+    <section class="panel" data-panel="quality">
+      <div class="card-head">
+        <div>
+          <h2>对话流水</h2>
+          <p class="hint">一句一条：情绪、耗时、它怎么回的、你有没有点过勾。看“假不假”和“懂不懂”都从这儿看。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="quality">刷新</button>
+      </div>
+      <div class="inline-form">
+        <input id="quality-filter" class="input" type="search" placeholder="搜输入或回复里的字…">
+        <select id="quality-range" class="input input-sm">
+          <option value="60">最近 60 条</option>
+          <option value="20">最近 20 条</option>
+          <option value="200">最近 200 条</option>
+        </select>
+        <button type="button" class="btn btn-primary btn-mini" id="quality-query">查询</button>
+      </div>
+      <div id="quality-summary" class="quality-summary"></div>
+      <div id="quality-list" class="turn-flow"></div>
+    </section>
+
+    <!-- 人格与口吻 -->
     <section class="panel" data-panel="personas">
       <div class="card-head">
-        <h2>人格模板</h2>
+        <div>
+          <h2>人格与口吻</h2>
+          <p class="hint">左边选模板，右边改提示词；同一时间只有一个启用。口吻规则写在代码里（语色门 + 反例清单），这里管的是“它是谁”。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="personas">刷新</button>
       </div>
-      <p class="hint">左侧选择模板编辑，右侧修改系统提示词；同一时间只有一个模板启用。</p>
       <div class="split">
         <div id="personas-list" class="table-scroll"></div>
         <form id="persona-form" class="form-col">
           <input type="hidden" id="persona-id">
           <label>名称<input id="persona-name" class="input" type="text" placeholder="人格名称"></label>
-          <label>系统提示词<textarea id="persona-prompt" class="input" rows="10" placeholder="你是一个温柔的陪伴者..."></textarea></label>
+          <label>系统提示词<textarea id="persona-prompt" class="input" rows="12" placeholder="你是一个温柔的陪伴者..."></textarea></label>
           <div class="btn-row">
             <button type="button" id="persona-new" class="btn btn-ghost btn-mini">新建</button>
             <button type="submit" class="btn btn-primary btn-mini">保存</button>
@@ -110,10 +153,12 @@
     <!-- 对话参数 -->
     <section class="panel" data-panel="params">
       <div class="card-head">
-        <h2>对话参数</h2>
+        <div>
+          <h2>对话参数</h2>
+          <p class="hint">按服务分组的全部可调参数，改动即时保存。温度、上下文轮数、记忆策略都在这里。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="params">刷新</button>
       </div>
-      <p class="hint">按服务分组的全部可调参数，改动即时保存。用于微调温度、上下文轮数、记忆策略等。</p>
       <div class="inline-form">
         <input id="flat-params-search" class="input" type="search" placeholder="搜索参数名或说明…">
         <span id="flat-params-count" class="hint" style="margin:0"></span>
@@ -121,23 +166,15 @@
       <div id="params-list" class="table-scroll"></div>
     </section>
 
-    <!-- 模型服务 -->
-    <section class="panel" data-panel="providers">
-      <div class="card-head">
-        <h2>模型服务</h2>
-        <button type="button" class="btn btn-ghost btn-mini" data-refresh="providers">刷新</button>
-      </div>
-      <p class="hint">每个服务一行：地址、模型名可直接改；点「高级」展开其余参数，改完点保存。</p>
-      <div id="providers-list" class="providers-group"></div>
-    </section>
-
     <!-- 声音 -->
     <section class="panel" data-panel="tts">
       <div class="card-head">
-        <h2>声音</h2>
+        <div>
+          <h2>声音</h2>
+          <p class="hint">每种情绪对应一段 3–10 秒参考录音；语速、音量按情绪单独设置，改完保存立即生效。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="tts">刷新</button>
       </div>
-      <p class="hint">每种情绪对应一段 3-10 秒的参考录音；语速、音量按情绪单独设置，改完保存立即生效。</p>
       <h3 class="sub">情绪 → 参考音</h3>
       <div id="voice-profiles" class="table-scroll"></div>
       <h3 class="sub">参考音频库</h3>
@@ -159,65 +196,27 @@
       <audio id="tts-preview-audio" controls></audio>
     </section>
 
-    <!-- 知识库 -->
-    <section class="panel" data-panel="knowledge">
-      <div class="card-head">
-        <h2>知识库</h2>
-        <button type="button" class="btn btn-ghost btn-mini" data-refresh="knowledge">刷新</button>
-      </div>
-      <p class="hint">长期记忆存在知识库里。先配好接入方式，再勾选要使用的库，最后试用检索。</p>
-      <h3 class="sub">接入配置</h3>
-      <div id="kb-provider-form" class="provider-list"></div>
-      <h3 class="sub">知识库列表</h3>
-      <div class="btn-row">
-        <button type="button" id="kb-bases-load" class="btn btn-primary btn-mini">拉取列表</button>
-        <button type="button" id="kb-ids-save" class="btn btn-ghost btn-mini">保存勾选</button>
-      </div>
-      <div id="kb-bases-list" class="table-scroll"></div>
-      <h3 class="sub">检索测试</h3>
-      <div class="inline-form">
-        <input id="kb-search-input" class="input" type="text" placeholder="输入一句话，看能召回什么…">
-        <input id="kb-search-topk" class="input input-sm" type="number" min="1" max="20" value="3">
-        <button type="button" id="kb-search-btn" class="btn btn-primary btn-mini">检索</button>
-      </div>
-      <div id="kb-search-results" class="table-scroll"></div>
-    </section>
-
-    <!-- 会话记录 -->
-    <section class="panel" data-panel="sessions">
-      <div class="card-head">
-        <h2>会话记录</h2>
-        <button type="button" class="btn btn-ghost btn-mini" data-refresh="sessions">刷新</button>
-      </div>
-      <p class="hint">按会话查看对话轮次、耗时与当轮快照，用于排查上下文和记忆是否生效。</p>
-      <h3 class="sub">会话列表</h3>
-      <div id="sessions-list" class="table-scroll"></div>
-      <h3 class="sub">每轮明细</h3>
-      <div class="inline-form">
-        <input id="turn-filter-session" class="input" type="text" placeholder="会话编号（可选）">
-        <input id="turn-filter-limit" class="input input-sm" type="number" min="1" max="500" value="100">
-        <button type="button" id="turn-logs-refresh" class="btn btn-primary btn-mini">查询</button>
-      </div>
-      <div id="turn-logs-list" class="table-scroll"></div>
-    </section>
-
     <!-- 事实记忆 -->
     <section class="panel" data-panel="facts">
       <div class="card-head">
-        <h2>事实记忆</h2>
+        <div>
+          <h2>事实记忆</h2>
+          <p class="hint">从对话里自动提取的长期事实，每轮注入提示词。过期、说错、或者像“你以前叫小暖”这种会带偏口吻的，直接删。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="facts">刷新</button>
       </div>
-      <p class="hint">从对话里自动提取的长期事实，会随每轮请求注入提示词。过期或错误的可直接删除。</p>
       <div id="facts-list" class="table-scroll"></div>
     </section>
 
-    <!-- 情感事件 -->
+    <!-- 情绪事件 -->
     <section class="panel" data-panel="emotions">
       <div class="card-head">
-        <h2>情感事件</h2>
+        <div>
+          <h2>情绪事件</h2>
+          <p class="hint">每轮识别出的情绪。判断错了可直接改标签和强度，用来纠正语气与语音表现。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="emotions">刷新</button>
       </div>
-      <p class="hint">每轮识别出的情绪。判断错了可以直接改标签和强度，用来纠正语气与语音表现。</p>
       <div class="filters">
         <label>标签
           <select id="filter-label" class="input input-sm">
@@ -235,34 +234,136 @@
       <div id="emotions-list" class="table-scroll"></div>
     </section>
 
+    <!-- 会话与快照 -->
+    <section class="panel" data-panel="sessions">
+      <div class="card-head">
+        <div>
+          <h2>会话与快照</h2>
+          <p class="hint">排查“它为什么这么答”用的：每轮的完整 prompt 快照在这里。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="sessions">刷新</button>
+      </div>
+      <h3 class="sub">会话列表</h3>
+      <div id="sessions-list" class="table-scroll"></div>
+      <h3 class="sub">每轮明细</h3>
+      <div class="inline-form">
+        <input id="turn-filter-session" class="input" type="text" placeholder="会话编号（可选）">
+        <input id="turn-filter-limit" class="input input-sm" type="number" min="1" max="500" value="100">
+        <button type="button" id="turn-logs-refresh" class="btn btn-primary btn-mini">查询</button>
+      </div>
+      <div id="turn-logs-list" class="table-scroll"></div>
+    </section>
+
+    <!-- 交付与勾叉 -->
+    <section class="panel" data-panel="deliveries">
+      <div class="card-head">
+        <div>
+          <h2>交付与勾叉</h2>
+          <p class="hint">它递过什么、你认不认。勾过“对了”的回复会自动进语料；被反复判“不对”的类型，系统会自己少给。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="deliveries">刷新</button>
+      </div>
+      <div id="policy-box" class="sub-card"></div>
+      <div id="deliveries-list" class="table-scroll"></div>
+    </section>
+
+    <!-- 工具调用 -->
+    <section class="panel" data-panel="tools">
+      <div class="card-head">
+        <div>
+          <h2>工具调用</h2>
+          <p class="hint">它真去查了什么、记了什么、约了什么提醒。不是“声称搜了”，是这条账。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="tools">刷新</button>
+      </div>
+      <div id="tools-list" class="table-scroll"></div>
+    </section>
+
+    <!-- 主动开口 -->
+    <section class="panel" data-panel="proactive">
+      <div class="card-head">
+        <div>
+          <h2>主动开口</h2>
+          <p class="hint">它自己先找你说过的话。闸门：22:00–8:00 不打扰、每天最多 2 次、闲置 3 小时才开口。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="proactive">刷新</button>
+      </div>
+      <div id="proactive-gate" class="sub-card"></div>
+      <div id="proactive-list" class="table-scroll"></div>
+    </section>
+
+    <!-- 语料与训练 -->
+    <section class="panel" data-panel="tone">
+      <div class="card-head">
+        <div>
+          <h2>语料与训练</h2>
+          <p class="hint">你点过“对了”的回复会原样攒着。攒到 300 条就能训一个只认你说话方式的 LoRA——训练在另一个页面，自己点。</p>
+        </div>
+        <a class="btn btn-primary btn-mini" href="train.html" target="_blank">去训练中心 ↗</a>
+      </div>
+      <div id="tone-stats" class="kpi-grid"></div>
+      <div id="tone-samples" class="table-scroll"></div>
+    </section>
+
+    <!-- 运行概览 -->
+    <section class="panel" data-panel="overview">
+      <div class="card-head">
+        <div>
+          <h2>运行概览</h2>
+          <p class="hint">累计轮次、情绪分布、延迟走势与各服务状态（原始视图，排错时看）。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="overview">刷新</button>
+      </div>
+      <div id="overview-kpi" class="kpi-grid"></div>
+      <div id="overview-statusbar" class="status-bar"></div>
+      <div class="chart-row">
+        <div class="chart-card">
+          <div class="chart-title">情绪分布 <span class="muted" id="chart-emotion-total"></span></div>
+          <div id="chart-emotion" class="chart-body"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">近期延迟 <span class="muted" id="chart-latency-meta"></span></div>
+          <div id="chart-latency" class="chart-body"></div>
+        </div>
+      </div>
+      <h3 class="sub">服务状态</h3>
+      <div id="overview-providers" class="provider-status-grid"></div>
+    </section>
+
+    <!-- 模型服务 -->
+    <section class="panel" data-panel="providers">
+      <div class="card-head">
+        <div>
+          <h2>模型服务</h2>
+          <p class="hint">每个服务一行：地址、模型名可直接改；点「高级」展开其余参数，改完保存。语音合成实际跑在大脑进程内，这里的地址只是调试入口。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="providers">刷新</button>
+      </div>
+      <div id="providers-list" class="providers-group"></div>
+    </section>
+
     <!-- 判断记录 -->
     <section class="panel" data-panel="logs">
       <div class="card-head">
-        <h2>判断记录</h2>
+        <div>
+          <h2>判断记录</h2>
+          <p class="hint">情感判断的逐条请求：输入、标签、置信度、强度与耗时。判断模型现在跑在大脑进程内。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="logs">刷新</button>
       </div>
-      <p class="hint">情感判断服务的逐条请求：输入、标签、置信度、强度与耗时。</p>
       <div id="judge-logs" class="table-scroll"></div>
-    </section>
-
-    <!-- 改动记录 -->
-    <section class="panel" data-panel="audit">
-      <div class="card-head">
-        <h2>改动记录</h2>
-        <button type="button" class="btn btn-ghost btn-mini" data-refresh="audit">刷新</button>
-      </div>
-      <p class="hint">配置与人格的每次变更都有留痕，改坏了可以对照这里回滚。</p>
-      <div id="audit-list" class="table-scroll"></div>
     </section>
 
     <!-- 服务日志 -->
     <section class="panel" data-panel="runlogs">
       <div class="card-head">
-        <h2>服务日志</h2>
+        <div>
+          <h2>服务日志</h2>
+          <p class="hint">各服务运行时输出，出错时先看这里。</p>
+        </div>
         <label class="chk-inline"><input type="checkbox" id="log-auto"> 自动刷新</label>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="runlogs">刷新</button>
       </div>
-      <p class="hint">各服务运行时输出，出错时先看这里。</p>
       <div class="log-tabs" id="log-tabs"></div>
       <div class="log-meta" id="log-meta"></div>
       <pre class="log-view" id="log-body">选上面一个服务</pre>
@@ -271,16 +372,56 @@
     <!-- 系统 -->
     <section class="panel" data-panel="system">
       <div class="card-head">
-        <h2>系统与显卡</h2>
+        <div>
+          <h2>系统与显卡</h2>
+          <p class="hint">服务运行方式、数据库统计与本机显卡占用。</p>
+        </div>
         <button type="button" class="btn btn-ghost btn-mini" data-refresh="system">刷新</button>
       </div>
-      <p class="hint">服务运行方式、数据库统计与本机显卡占用。</p>
       <h3 class="sub">服务运行方式</h3>
       <div id="system-providers" class="table-scroll"></div>
       <h3 class="sub">统计</h3>
       <div id="system-stats" class="table-scroll"></div>
       <h3 class="sub">显卡状态</h3>
       <div id="gpu-status" class="table-scroll"></div>
+    </section>
+
+    <!-- 改动记录 -->
+    <section class="panel" data-panel="audit">
+      <div class="card-head">
+        <div>
+          <h2>改动记录</h2>
+          <p class="hint">配置与人格的每次变更都有留痕，改坏了可以对照这里回滚。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="audit">刷新</button>
+      </div>
+      <div id="audit-list" class="table-scroll"></div>
+    </section>
+
+    <!-- 知识库 -->
+    <section class="panel" data-panel="knowledge">
+      <div class="card-head">
+        <div>
+          <h2>知识库（工具）</h2>
+          <p class="hint">它已经不在对话热路径上了：平时不检索、不往提示词里灌；只有你明确让它查的时候才会用。想让它当第二大脑，就得先把这里接上。</p>
+        </div>
+        <button type="button" class="btn btn-ghost btn-mini" data-refresh="knowledge">刷新</button>
+      </div>
+      <h3 class="sub">接入配置</h3>
+      <div id="kb-provider-form" class="provider-list"></div>
+      <h3 class="sub">知识库列表</h3>
+      <div class="btn-row">
+        <button type="button" id="kb-bases-load" class="btn btn-primary btn-mini">拉取列表</button>
+        <button type="button" id="kb-ids-save" class="btn btn-ghost btn-mini">保存勾选</button>
+      </div>
+      <div id="kb-bases-list" class="table-scroll"></div>
+      <h3 class="sub">检索测试</h3>
+      <div class="inline-form">
+        <input id="kb-search-input" class="input" type="text" placeholder="输入一句话，看能召回什么…">
+        <input id="kb-search-topk" class="input input-sm" type="number" min="1" max="20" value="3">
+        <button type="button" id="kb-search-btn" class="btn btn-primary btn-mini">检索</button>
+      </div>
+      <div id="kb-search-results" class="table-scroll"></div>
     </section>
 
   </div>
