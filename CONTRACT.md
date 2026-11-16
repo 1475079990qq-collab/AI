@@ -202,7 +202,7 @@ Flutter 工程，包名 `com.companion.app`，`minSdk 21`。
 - 用户原话强调「模型是模型，控制大脑是控制大脑，前端是前端，这是两回事」，任何把模型参数写死在前端 / 代码里的做法都算违反。
 
 ### 10.1 新增共享模块（主智能体已完成，**禁止修改**）
-`brain/config_store.py`：5 类 provider（llm / embedding / judge / tts / knowledge）的字段元数据 `PROVIDER_FIELDS`（共 66 项，前端据此动态渲染表单）、`PROVIDER_DEFAULTS`、`RUNTIME_RULES`（16 项运行时参数/全局开关）、`KNOWN_BASES`（4 个知识库，2026-11-13 实拉）、`VOICE_DEFAULTS`（8 情绪），以及下述 DAO：
+`brain/config_store.py`：6 类 provider（llm / llm_alt / judge / asr / tts / knowledge）的字段元数据 `PROVIDER_FIELDS`（共 81 项，前端据此动态渲染表单）、`PROVIDER_DEFAULTS`、`RUNTIME_RULES`（10 项运行时参数/全局开关）、`KNOWN_BASES`（4 个知识库，2026-11-13 实拉）、`VOICE_DEFAULTS`（8 情绪），以及下述 DAO：
 
 ```
 init_store()                       # 建表 + 幂等种子，两个 app 的 lifespan 都已调用
@@ -236,7 +236,7 @@ def resolve(code: str, key: str, default=None) # 取单个配置值
 def is_mock(code: str) -> bool                 # enabled=0 或 mode in {mock,off} → True
 def snapshot() -> dict                         # config_store.provider_snapshot()
 def test(code: str) -> dict                    # {"ok","latency_ms","mode","detail"}，真实探测；异常一律降级不抛
-#   llm/embedding/tts: GET 或最小 POST 探测；judge: 用一句样例跑一次判断；knowledge: 调 list_bases()
+#   llm/tts/asr: GET 或最小 POST 探测；judge: 用一句样例跑一次判断；knowledge: 调 list_bases()
 #   mode=mock 时返回 ok=True + detail="mock 模式，未发起真实连接"
 
 # knowledge.py —— 知识库适配层（用户用 MCP 工具直连 WeKnora 做长期记忆与特殊条目）

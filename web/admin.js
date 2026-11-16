@@ -25,7 +25,7 @@
   // 技术代号（mock / http / onnx …）统一翻成人话；英文原文挪到鼠标悬停提示里，
   // 平时不占视线，排错时还能看到。
   var PROVIDER_ZH = {
-    llm: '对话大模型', embedding: '文本向量', judge: '情感判断',
+    llm: '对话大模型', judge: '情感判断',
     asr: '语音识别', tts: '语音合成', knowledge: '知识库'
   };
   var MODE_ZH = {
@@ -276,7 +276,7 @@
     fear: '#8a94a6', disgust: '#2eb872', neutral: '#b6c0d4', care: '#ec7fae'
   };
   var PROVIDER_COLORS = {
-    llm: '#2f6feb', embedding: '#9b6bd6', judge: '#f2b23e', tts: '#ec7fae', knowledge: '#2eb872'
+    llm: '#2f6feb', judge: '#f2b23e', tts: '#ec7fae', knowledge: '#2eb872'
   };
 
   // 原生 SVG 环图：8 情绪占比，零 CDN
@@ -593,7 +593,6 @@
   // 常用字段：默认显示；其余字段收进「高级设置」<details>（默认收起）
   var COMMON_FIELDS = {
     llm: ['api_style', 'base_url', 'api_key', 'model', 'num_gpu', 'force_gpu'],
-    embedding: ['model', 'dimension', 'force_cpu'],
     judge: ['engine', 'model_path', 'intensity_threshold'],
     asr: ['base_url', 'model', 'language'],
     tts: ['base_url', 'model', 'default_voice', 'speed', 'use_reference_audio'],
@@ -606,7 +605,6 @@
       name: '本地全离线',
       plan: {
         llm: { api_style: 'openai', base_url: 'http://127.0.0.1:11434', model: 'qwen3:8b', num_gpu: 999, force_gpu: true },
-        embedding: { model: 'bge-m3', force_cpu: true },
         tts: { base_url: 'http://127.0.0.1:9880', use_reference_audio: true },
         judge: { engine: 'onnx', precision: 'fp32' }
       }
@@ -1313,7 +1311,7 @@
   // ---------- 6 · 运行时参数 / 全局开关（扁平表）----------
   // 参考小智后台：参数管理是一张扁平的 key-value 表（编码 + 说明 + 值 + 分组 + 搜索），
   // 不再按模块堆大表单。provider 字段在前，运行时参数在后，统一走 flat-params 接口。
-  var FLAT_GROUP_ORDER = ['llm', 'embedding', 'judge', 'asr', 'tts', 'knowledge', 'runtime'];
+  var FLAT_GROUP_ORDER = ['llm', 'judge', 'asr', 'tts', 'knowledge', 'runtime'];
 
   // 通用归一：数组 → [{key,value}]；对象 → 摊平成 [{key,value}]
   function normalizeParams(data) {
