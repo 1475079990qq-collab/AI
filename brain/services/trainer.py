@@ -31,6 +31,10 @@ _PROC: subprocess.Popen | None = None
 _STATUS_CACHE: tuple[float, dict] | None = None
 _STATUS_TTL = 30.0
 
+# 训练样本下限：与既有 dataset.ready / 训练页「未到 200 条」保持一致（200 条起步）。
+# 低于此值视为样本不足，status() 会给出 samples_ready=false + reason，前端据此拦截空训练。
+MIN_TRAIN_SAMPLES = 200
+
 
 # ---------------- 环境体检 ----------------
 
@@ -158,6 +162,17 @@ def status() -> dict:
             ("torch", "transformers", "peft", "accelerate", "datasets", "bitsandbytes")}
     data_dir = ROOT / "data" / "lora"
     samples = db.count_tone_samples()
+    train_n = _count_lines(data_dir / "train.jsonl")
+    valid_n = _count_lines(data_dir / "valid.jsonl")
+    # 只加字段、不改既有字段，向后兼容。
+    samples_ready = train_n >= MIN_TRAIN_SAMPLES
+    if samples_ready:
+        reason = ""
+    elif train_n == 0:
+        reason = "训练数据 train.jsonl 是空的，请先点「准备训练集」攒够对话语料再训练"
+    else:
+        reason = "训练样本只有 %d 条，不足 %d 条，请先补充语料再训练" % (
+            train_n, MIN_TRAIN_SAMPLES)
     result = {
         "python": PY,
         "torch": _torch_state(),
@@ -166,10 +181,13 @@ def status() -> dict:
         "samples": samples,
         "dataset": {
             "dir": str(data_dir),
-            "train": _count_lines(data_dir / "train.jsonl"),
-            "valid": _count_lines(data_dir / "valid.jsonl"),
-            "ready": _count_lines(data_dir / "train.jsonl") >= 200,
+            "train": train_n,
+            "valid": valid_n,
+            "ready": train_n >= MIN_TRAIN_SAMPLES,
         },
+        "samples_ready": samples_ready,
+        "sample_ready": samples_ready,  # 兼容实施计划里的单数命名
+        "reason": reason,
         "models": list_models(),
         "llamacpp": _llamacpp(),
         "options": install_options(),

@@ -64,6 +64,15 @@ async def _lifespan(app: FastAPI):
         live.bind_loop(asyncio.get_running_loop())
     except Exception:
         pass
+    # 启动维护：backfill 追平历史事实 + 每个用户一次衰减。
+    # 丢线程池后台跑，不拖启动；init_db 已完成，表都在（幂等、有上限）。
+    try:
+        from brain.services import maintenance
+
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, maintenance.startup_maintenance)
+    except Exception:
+        pass
     # 模型服务的体检放在启动器横幅里（brain.launch），这里不重复打印。
     task = asyncio.create_task(_proactive_loop())
     try:

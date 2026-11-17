@@ -236,6 +236,20 @@ def feedback(body: FeedbackBody) -> JSONResponse:
         return JSONResponse(status_code=503, content={"ok": False, "detail": "FEEDBACK_UNAVAILABLE"})
     if body.delivery_id and verdict != 0:
         db.set_delivery_verdict(int(body.delivery_id), verdict)
+    # V2：反馈不只记一条日志，还要落回三处权重（记忆 / 经验 / 策略）。
+    # 失败只记日志，绝不影响回执。
+    if verdict != 0 and body.request_id:
+        try:
+            from brain.evolution import feedback as evolution_feedback
+
+            effect = evolution_feedback.on_verdict(request_id=body.request_id,
+                                                   ok=(verdict == 1))
+            log.info("反馈落账  %s  ｜facts=%s lesson=%s strategy=%s", kind,
+                     effect.get("facts_adjusted"),
+                     (effect.get("lesson") or {}).get("weight"),
+                     (effect.get("strategy") or {}).get("status"))
+        except Exception:
+            log.exception("反馈落权重失败（回执照常）")
     # 他说「对了」＝这轮语色过关，原样留一份当将来 LoRA 的料。
     # 存失败不影响回执：语料是慢慢攒的，不能因为它把反馈弄丢。
     if verdict == 1 and body.request_id:

@@ -16,6 +16,11 @@
   var factCap = null;           // 不设数量上限（模块返回 null，前端不显示封顶值）
   var lessonCap = null;
   var lessonAnchors = {};
+  var growthState = null;       // 最近一次生长结果（增量长新节点时原地改它再重画）
+  var factWeight = {};          // fact id → importance：重要的记忆点画得大一点
+  var useRealGraph = false;     // 当前画的是后端真实 neurons/synapses，还是前端估算
+  var graphEdgeMeta = null;     // 每条边的关系类型与权重（真实图才有）
+  var nidIndex = {};            // 神经元 id → 下标（事件里点名哪颗记忆时用）
 
   // 八个认知区（冻结契约，编号三路共用）：听见 / 情绪 / 回忆 / 联想 / 判断 / 表达 / 反思 / 沉淀
   var REGIONS = [
@@ -73,10 +78,17 @@
 
   // 把模块算出的整图接进当前画面：先算完再换引用，旧图在新图就绪前继续画
   function applyGrowth(res) {
+    growthState = res;
+    useRealGraph = !!res.real;
+    graphEdgeMeta = res.edgeMeta || null;
     neurons = res.neurons.map(function (n) {
+      var w = (n.fid != null && factWeight[String(n.fid)] != null)
+        ? factWeight[String(n.fid)] : (n.importance != null ? n.importance : null);
       return {
         nx: n.nx, ny: n.ny, region: n.region, heat: 0,
-        size: n.size, delay: n.delay, fid: n.fid, kind: n.kind
+        // 重要程度直接体现在点的大小上：身份/禁忌比「今天吃了什么」大一圈
+        size: n.size * (w == null ? 1 : (0.75 + 0.55 * w)),
+        delay: n.delay, fid: n.fid, kind: n.kind, weight: w, nid: n.nid, label: n.label
       };
     });
     edges = res.edges || [];
@@ -88,11 +100,17 @@
     factCap = res.factCap == null ? null : res.factCap;
     lessonCap = res.lessonCap == null ? null : res.lessonCap;
     adj = neurons.map(function () { return []; });
+    var linkCap = useRealGraph ? 14 : 8;   // 真实图里概念节点度数高，截太狠会让联想断在半路
     edges.forEach(function (e) {
-      if (adj[e[0]].length < 8) adj[e[0]].push(e[1]);
-      if (adj[e[1]].length < 8) adj[e[1]].push(e[0]);
+      if (adj[e[0]].length < linkCap) adj[e[0]].push(e[1]);
+      if (adj[e[1]].length < linkCap) adj[e[1]].push(e[0]);
     });
     REGIONS[2].hint = '一条事实一颗回忆神经元（不设上限）';
+    nidIndex = {};
+    if (useRealGraph) {
+      neurons.forEach(function (n, i) { if (n.nid) nidIndex[String(n.nid)] = i; });
+      REGIONS[3].hint = '概念节点：同一个词被第二条记忆说到才长出来';
+    }
     if (W >= 320) position();
   }
 
@@ -313,12 +331,67 @@
     var headers = token ? { 'X-Admin-Token': token } : {};
     Promise.all([
       fetch('/api/admin/facts?limit=20000', { headers: headers }).then(function (r) { return r.json(); }),
-      fetch('/api/admin/lessons?limit=20000', { headers: headers }).then(function (r) { return r.json(); }).catch(function () { return { items: [] }; })
-    ]).then(function (pair) {
-      var facts = Array.isArray(pair[0]) ? pair[0] : ((pair[0] && pair[0].items) || []);
-      var lessons = (pair[1] && pair[1].items) || [];
+      fetch('/api/admin/lessons?limit=20000', { headers: headers }).then(function (r) { return r.json(); }).catch(function () { return { items: [] }; }),
+      // 真实神经网络：节点与突触都是后端长好的，前端只负责摆位置
+      fetch('/api/admin/graph?nodes_limit=1500&edges_limit=4000', { headers: headers })
+        .then(function (r) { return r.json(); }).catch(function () { return null; })
+    ]).then(function (triple) {
+      var facts = Array.isArray(triple[0]) ? triple[0] : ((triple[0] && triple[0].items) || []);
+      var lessons = (triple[1] && triple[1].items) || [];
+      var graph = triple[2];
+      factWeight = {};
+      facts.forEach(function (f) {
+        if (f && f.id != null) {
+          var w = Number(f.importance);
+          factWeight[String(f.id)] = isFinite(w) ? Math.max(0, Math.min(1, w)) : 0.5;
+        }
+      });
+      if (BG && graph && Array.isArray(graph.nodes) && graph.nodes.length) {
+        try {
+          var base = BG.build([], []);
+          applyGrowth(BG.mergeGraph(base, graph, {}));
+          if (W >= 320) position();
+          renderLegend();
+          updateFactLoad();
+          return;
+        } catch (e) {
+          console.warn('[brain] 真实网络构建失败，退回按事实生长：', e && e.message || e);
+        }
+      }
       assignFacts(facts, lessons);
     }).catch(function () { /* 读不到事实就只按条数放电，不影响直播 */ });
+  }
+
+  // 新记忆落库后重拉一次真实图（去抖）：位置按 id 稳定键算，老节点不会挪，热度按 nid 保留
+  var graphTimer = 0;
+  function scheduleGraphRefresh() {
+    if (graphTimer) clearTimeout(graphTimer);
+    graphTimer = setTimeout(refreshGraph, 500);
+  }
+
+  function refreshGraph() {
+    graphTimer = 0;
+    if (!BG) return;
+    var token = '';
+    try { token = localStorage.getItem('companion.admin_token') || ''; } catch (e) { /* noop */ }
+    fetch('/api/admin/graph?nodes_limit=1500&edges_limit=4000',
+      { headers: token ? { 'X-Admin-Token': token } : {} })
+      .then(function (r) { return r.json(); })
+      .then(function (g) {
+        if (!g || !Array.isArray(g.nodes) || !g.nodes.length) return;
+        var heatBefore = {};
+        neurons.forEach(function (n) { if (n.nid) heatBefore[String(n.nid)] = n.heat; });
+        var base = BG.build([], []);
+        applyGrowth(BG.mergeGraph(base, g, {}));
+        neurons.forEach(function (n) {
+          var h = n.nid ? heatBefore[String(n.nid)] : null;
+          if (h != null) n.heat = h;
+        });
+        if (W >= 320) position();
+        renderLegend();
+        updateFactLoad();
+      })
+      .catch(function () { /* 拉不到就保持现状，等下一次事件 */ });
   }
 
   // 事件 → 认知区下标；工序事件（拼上下文 / 合成语音 / 落库 / 工具）不设脑区，返回 -1
@@ -327,6 +400,7 @@
       case 'turn_start': return 0;
       case 'judge': return 1;
       case 'memory': return 2;
+      case 'intent': return 4;      // 认知调度：这一轮判定成什么、打算怎么接
       case 'llm_start': case 'think_draft': return 4;
       case 'tokens': case 'first_token': return 5;
       case 'self_check': case 'ruminate_start': case 'ruminate_done': return 6;
@@ -374,8 +448,10 @@
         return moodLabel(ev.emotion) + ' · ' + (ev.intensity != null ? Number(ev.intensity).toFixed(2) : '—');
       case 'memory':
         return ev.fact_text ? clipText(ev.fact_text, 14) : '这次没想起旧事';
+      case 'intent':
+        return ev.plan ? clipText(ev.plan, 14) : (ev.intent_cn || '先按直觉回');
       case 'llm_start':
-        return ev.intent || '先按直觉回';
+        return ev.intent_cn || (ev.intent ? clipText(ev.intent, 12) : '拿主意');
       case 'think_draft':
         return '先在心里过一遍';
       case 'tokens':
@@ -391,8 +467,10 @@
         return why ? clipText(why, 14) : '这一轮还没回头看';
       case 'bg_start': return REGIONS[7].value || '在后台消化…';
       case 'bg_done': return REGIONS[7].value || '这轮没留下新东西';
-      case 'fact_saved': case 'fact_added': case 'fact_stored': case 'lesson_saved':
+      case 'fact_saved': case 'fact_added': case 'fact_stored':
         return ev.fact_text ? '记住：' + clipText(ev.fact_text, 12) : '这轮没留下新东西';
+      case 'lesson_saved':
+        return ev.lesson_text ? '学到：' + clipText(ev.lesson_text, 12) : '这轮没留下新东西';
       default: return '';
     }
   }
@@ -412,6 +490,9 @@
       case 'turn_start': return { txt: '他说了一句', region: '听见', internal: false };
       case 'judge': return { txt: moodLabel(ev.emotion) || '没读出情绪', region: '情绪', internal: false };
       case 'memory': return { txt: '想起 ' + (ev.facts || 0) + ' 条旧事', region: '回忆', internal: false };
+      case 'intent':
+        return { txt: '判成：' + (ev.intent_cn || ev.intent || '闲聊') +
+          (ev.plan ? '·' + clipText(ev.plan, 12) : ''), region: '判断', internal: false };
       case 'llm_start': return { txt: '拿主意', region: '判断', internal: false };
       case 'think_draft': return { txt: '先在心里过一遍', region: '判断', internal: false };
       case 'tokens': return { txt: '正在说（' + (ev.chars || 0) + ' 字）', region: '表达', internal: false };
@@ -447,6 +528,31 @@
     document.getElementById('fired').textContent = String(firedTotal);
   }
 
+  // 增量长一颗：新记忆落库时只追加一颗节点和它自己的连线，不重算整张图
+  function growOne(item, kind, now) {
+    if (!BG || !growthState || !item || item.id == null) return;
+    var res;
+    try {
+      res = kind === 'lesson' ? BG.addLesson(growthState, item) : BG.addFact(growthState, item);
+    } catch (e) {
+      console.warn('[brain] 增量生长失败：', e && e.message || e);
+      return;
+    }
+    if (!res) return;
+    var heats = neurons.map(function (n) { return n.heat; });
+    applyGrowth(growthState);
+    neurons.forEach(function (n, i) { if (heats[i] != null) n.heat = heats[i]; });
+    if (W >= 320) position();
+    var fresh = neurons[res.index];
+    if (fresh) {
+      fresh.heat = 0.9;      // 刚长出来的点先亮一下，让人看得见「这是新长的那一颗」
+      cascade.push({ i: res.index, due: now + 8, hops: 0, energy: 1.15 });
+    }
+    renderLegend();
+    firedTotal += 1;
+    document.getElementById('fired').textContent = String(firedTotal);
+  }
+
   function onEvent(ev) {
     if (!ev || !ev.kind) return;
     var now = performance.now();
@@ -478,6 +584,23 @@
         }
       }
       // 不再凭空「投射到下一区」：联络只沿真实突触（adj）传，事件本身按真实时序到达
+    }
+
+    // 新记忆 / 新教训：真实图模式下重拉一次结构（去抖），回退模式下只长一颗
+    if (ev.kind === 'fact_saved' || ev.kind === 'fact_added') {
+      if (useRealGraph) scheduleGraphRefresh();
+      else growOne({ id: ev.fact_id, text: ev.fact_text }, 'fact', now);
+    } else if (ev.kind === 'lesson_saved') {
+      if (useRealGraph) scheduleGraphRefresh();
+      else growOne({ id: ev.lesson_id, note: ev.lesson_text }, 'lesson', now);
+    }
+    // 召回点名：这一轮具体想起了哪几条记忆，就把那几颗节点点亮（不是整区一起亮）
+    if (ev.kind === 'memory' && useRealGraph && Array.isArray(ev.neurons)) {
+      for (var mn = 0; mn < ev.neurons.length; mn++) {
+        var mi = nidIndex[String(ev.neurons[mn])];
+        if (mi === undefined) continue;
+        cascade.push({ i: mi, due: now + 10 + mn * 16, hops: 0, energy: 0.95 });
+      }
     }
     if (ev.kind === 'turn_done' || ev.kind === 'turn_error') {
       lastTurnMs = ev.ms || null;
@@ -521,48 +644,97 @@
     ctx.stroke();
     ctx.restore();
 
-    // 突触：冷线一次批量画，热线单独画，成本可控
-    ctx.strokeStyle = 'rgba(150,178,172,' + Math.max(0.10, 0.20 * dens) + ')';
-    ctx.lineWidth = 0.75;
-    ctx.beginPath();
-    for (var e = 0; e < edges.length; e++) {
-      var A = neurons[edges[e][0]], B = neurons[edges[e][1]];
-      if (!A || !B) continue;
-      ctx.moveTo(A.x, A.y);
-      ctx.lineTo(B.x, B.y);
-    }
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(130,220,200,.20)';
-    ctx.lineWidth = 1.1;
-    for (var e2 = 0; e2 < edges.length; e2++) {
-      var A2 = neurons[edges[e2][0]], B2 = neurons[edges[e2][1]];
-      var h = Math.max(A2.heat, B2.heat);
-      if (h < 0.28) continue;
-      ctx.globalAlpha = h * 0.65;
-      ctx.beginPath();
-      ctx.moveTo(A2.x, A2.y);
-      ctx.lineTo(B2.x, B2.y);
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-
-    // 联想：共享两字词的事实之间那根线（静息压很淡，记忆区有余温时才提亮；
-    // 总量越大只留最淡一层，透明度随总量线性下降，边的取舍仍由生长模块决定）
-    if (assocPairs.length) {
-      var memHeat = regionHeat(REGIONS[2]);
-      var assocFade = Math.max(0.4, 680 / N);
-      var assocAlpha = (0.032 + memHeat * 0.085) * assocFade;
-      ctx.strokeStyle = 'rgba(170,145,215,' + assocAlpha + ')';
+    // 突触/联想：有真实图时画 synapses 里的关系；没有时才退回「空间近邻 + 共享两字词」
+    if (useRealGraph && graphEdgeMeta && edges.length) {
+      var REL_COLOR = {
+        about: 'rgba(96,196,178,',      // 记忆 → 概念
+        semantic: 'rgba(168,142,224,',  // 记忆 ↔ 记忆（共享概念）
+        cooccur: 'rgba(126,156,196,',   // 概念 ↔ 概念（同时出现）
+        lesson: 'rgba(214,170,96,'      // 教训 → 概念
+      };
+      var groups = {};
+      for (var gi = 0; gi < edges.length && gi < graphEdgeMeta.length; gi++) {
+        var rel = graphEdgeMeta[gi].rel || 'other';
+        if (!groups[rel]) groups[rel] = [];
+        groups[rel].push(gi);
+      }
+      Object.keys(groups).forEach(function (rel) {
+        var list = groups[rel];
+        var sum = 0;
+        for (var s = 0; s < list.length; s++) sum += graphEdgeMeta[list[s]].w;
+        var avg = sum / Math.max(1, list.length);
+        var color = REL_COLOR[rel] || 'rgba(150,178,172,';
+        ctx.strokeStyle = color + (0.09 + 0.13 * avg) + ')';
+        ctx.lineWidth = 0.7;
+        ctx.beginPath();
+        for (var b2 = 0; b2 < list.length; b2++) {
+          var E1 = edges[list[b2]];
+          var A3 = neurons[E1[0]], B3 = neurons[E1[1]];
+          if (!A3 || !B3) continue;
+          ctx.moveTo(A3.x, A3.y);
+          ctx.lineTo(B3.x, B3.y);
+        }
+        ctx.stroke();
+        // 热的那几条单独描：粗细跟着突触权重走（常被用上的关联更"实")
+        for (var h2 = 0; h2 < list.length; h2++) {
+          var E2 = edges[list[h2]];
+          var A4 = neurons[E2[0]], B4 = neurons[E2[1]];
+          if (!A4 || !B4) continue;
+          var heat2 = Math.max(A4.heat, B4.heat);
+          if (heat2 < 0.22) continue;
+          ctx.strokeStyle = color + Math.min(0.62, heat2 * 0.58) + ')';
+          ctx.lineWidth = 0.7 + graphEdgeMeta[list[h2]].w * 1.7;
+          ctx.beginPath();
+          ctx.moveTo(A4.x, A4.y);
+          ctx.lineTo(B4.x, B4.y);
+          ctx.stroke();
+        }
+      });
+      ctx.globalAlpha = 1;
+    } else {
+      // 突触：冷线一次批量画，热线单独画，成本可控
+      ctx.strokeStyle = 'rgba(150,178,172,' + Math.max(0.10, 0.20 * dens) + ')';
       ctx.lineWidth = 0.75;
       ctx.beginPath();
-      for (var q = 0; q < assocPairs.length; q++) {
-        var P1 = neurons[assocPairs[q][0]], P2 = neurons[assocPairs[q][1]];
-        if (!P1 || !P2) continue;
-        ctx.moveTo(P1.x, P1.y);
-        ctx.lineTo(P2.x, P2.y);
+      for (var e = 0; e < edges.length; e++) {
+        var A = neurons[edges[e][0]], B = neurons[edges[e][1]];
+        if (!A || !B) continue;
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
       }
       ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(130,220,200,.20)';
+      ctx.lineWidth = 1.1;
+      for (var e2 = 0; e2 < edges.length; e2++) {
+        var A2 = neurons[edges[e2][0]], B2 = neurons[edges[e2][1]];
+        var h = Math.max(A2.heat, B2.heat);
+        if (h < 0.28) continue;
+        ctx.globalAlpha = h * 0.65;
+        ctx.beginPath();
+        ctx.moveTo(A2.x, A2.y);
+        ctx.lineTo(B2.x, B2.y);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      // 联想：共享两字词的事实之间那根线（静息压很淡，记忆区有余温时才提亮；
+      // 总量越大只留最淡一层，透明度随总量线性下降，边的取舍仍由生长模块决定）
+      if (assocPairs.length) {
+        var memHeat = regionHeat(REGIONS[2]);
+        var assocFade = Math.max(0.4, 680 / N);
+        var assocAlpha = (0.032 + memHeat * 0.085) * assocFade;
+        ctx.strokeStyle = 'rgba(170,145,215,' + assocAlpha + ')';
+        ctx.lineWidth = 0.75;
+        ctx.beginPath();
+        for (var q = 0; q < assocPairs.length; q++) {
+          var P1 = neurons[assocPairs[q][0]], P2 = neurons[assocPairs[q][1]];
+          if (!P1 || !P2) continue;
+          ctx.moveTo(P1.x, P1.y);
+          ctx.lineTo(P2.x, P2.y);
+        }
+        ctx.stroke();
+      }
     }
 
     // 放电队列
@@ -622,10 +794,31 @@
       } else {
         // 静息神经元：整片脑要看得清（不然停止对话时几乎全黑），但不喧宾夺主
         var rr = Math.max(0.7, (n.size + 0.35) * dens);
-        ctx.fillStyle = 'rgba(186,210,205,' + (restAlpha + breath * breathAmp) + ')';
+        // 概念节点给一点偏冷蓝，和记忆/教训区分开：它不是一个"经历"，是一个"词"
+        ctx.fillStyle = n.kind === 'concept'
+          ? 'rgba(176,198,232,' + (restAlpha + breath * breathAmp) + ')'
+          : 'rgba(186,210,205,' + (restAlpha + breath * breathAmp) + ')';
         ctx.beginPath();
         ctx.arc(n.x, n.y, rr, 0, Math.PI * 2);
         ctx.fill();
+      }
+    }
+
+    // 概念词标签：联想区里最重的那些词直接写在点上，让「记忆→概念」这条关系看得见
+    if (useRealGraph) {
+      var labeled = 0;
+      ctx.textAlign = 'center';
+      ctx.font = '500 9.5px -apple-system, "Microsoft YaHei", sans-serif';
+      for (var ci = 0; ci < neurons.length && labeled < 18; ci++) {
+        var cn = neurons[ci];
+        if (cn.kind !== 'concept' || !cn.label) continue;
+        var cw = cn.weight == null ? 0.5 : cn.weight;
+        if (cw < 0.5 && cn.heat < 0.18) continue;
+        ctx.fillStyle = cn.heat > 0.18
+          ? 'rgba(198,228,255,' + Math.min(0.85, 0.4 + cn.heat * 0.5) + ')'
+          : 'rgba(176,200,232,.38)';
+        ctx.fillText(cn.label, cn.x, cn.y + (cn.size + 1) * dens + 8);
+        labeled++;
       }
     }
 
@@ -876,5 +1069,187 @@
         });
       })
       .catch(function () { /* 补历史失败不影响直播 */ });
+  })();
+
+  /* =======================================================================
+   * T37 认知轨迹观察面板：四类节点 + SSE 实时 + 历史切换（观察室前端最后一块）
+   * 独立 IIFE，不碰上面的神经元/SSE 逻辑；DOM 与样式来自 T36 的 brain.html。
+   * 四类节点严格按 node_type 映射：structure=蓝 / memory=绿 / activity=琥珀 /
+   * emergent=青；禁 emoji、禁紫粉渐变。
+   * ===================================================================== */
+  (function () {
+    'use strict';
+    var box = document.getElementById('cog-nodes');
+    var summary = document.getElementById('cog-summary');
+    var historyBtn = document.getElementById('cog-history');
+    if (!box) return;
+
+    var token = '';
+    try { token = localStorage.getItem('companion.admin_token') || ''; } catch (e) { /* noop */ }
+
+    var ICON = {
+      structure: '#ic-structure', memory: '#ic-memory',
+      activity: '#ic-activity', emergent: '#ic-emergent'
+    };
+    var CLS = {
+      structure: 'nd-structure', memory: 'nd-memory',
+      activity: 'nd-activity', emergent: 'nd-emergent'
+    };
+    var KIND_CN = {
+      trace: '轨迹', decision: '决策', appraisal: '评估', memory: '记忆',
+      goal_hit: '目标', feedback: '反馈', verdict: '校验',
+      decay_done: '衰减', config_warn: '配置'
+    };
+    // 只有“带 trace_id 且属于认知白名单”的事件才是轨迹节点；turn_start/judge 等工序事件不算。
+    var COG_KINDS = {
+      trace: 1, decision: 1, appraisal: 1, memory: 1,
+      goal_hit: 1, feedback: 1, verdict: 1, decay_done: 1, config_warn: 1
+    };
+
+    var liveNodes = [];     // 本轮：页面打开后 SSE 实时到达的认知事件
+    var historyNodes = [];  // 历史：/api/admin/cognitive-trace 落库记录
+    var mode = 'live';      // 'live' | 'history'
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+      });
+    }
+
+    // 历史接口的 payload 是 JSON 字符串；SSE 事件的字段是扁平的（没有 payload 包裹）。
+    function asObj(v) {
+      if (v && typeof v === 'object') return v;
+      if (typeof v === 'string') {
+        try { return JSON.parse(v) || {}; } catch (e) { return {}; }
+      }
+      return {};
+    }
+
+    function payloadOf(it) {
+      if (it.payload != null) return asObj(it.payload);
+      return asObj(it); // SSE 扁平事件：字段直接挂在事件对象上
+    }
+
+    // 节点主文案：优先决定摘要 → 简述 → 候选摘要 → 中文 kind → 节点类型名。绝不编造。
+    function nodeText(it, p) {
+      var first = (Array.isArray(p.options) && p.options[0] && p.options[0].summary)
+        ? p.options[0].summary : '';
+      return p.decision_summary || p.brief || first ||
+        KIND_CN[it.kind] || p.kind ||
+        ({ structure: '结构节点', memory: '真实记忆', activity: '活动节点', emergent: '新生节点' }[it.node_type]) ||
+        it.kind || '认知事件';
+    }
+
+    function nodeHtml(it, live) {
+      var nt = CLS[it.node_type] ? it.node_type : 'activity'; // 非法 node_type 回退活动节点
+      var p = payloadOf(it);
+      var sub = (KIND_CN[it.kind] || it.kind || '') +
+        (it.created_at ? ' · ' + it.created_at : '') +
+        (it.trace_id ? ' · ' + String(it.trace_id).slice(0, 8) : '');
+      return '<div class="cog-node' + (live ? ' pulse' : '') + '">' +
+        '<svg class="' + CLS[nt] + '"><use href="' + ICON[nt] + '"/></svg>' +
+        '<div><div>' + esc(nodeText(it, p)) + '</div><small>' + esc(sub) + '</small></div></div>';
+    }
+
+    function emptyHtml() {
+      return '<div class="cog-node cog-empty"><div><div>' +
+        (mode === 'history' ? '历史轨迹暂时读不到或为空' : '等待本轮认知事件…') +
+        '</div><small>' +
+        (mode === 'history' ? '点「本轮」回到实时视图' : '本轮走 SSE 实时到达 · 点「历史」看落库记录') +
+        '</small></div></div>';
+    }
+
+    function render() {
+      var list = mode === 'history' ? historyNodes : liveNodes;
+      if (!list.length) { box.innerHTML = emptyHtml(); return; }
+      box.innerHTML = list.map(function (it) { return nodeHtml(it, mode === 'live'); }).join('');
+    }
+
+    function syncBtn() {
+      if (!historyBtn) return;
+      historyBtn.textContent = mode === 'history' ? '本轮' : '历史';
+      historyBtn.setAttribute('aria-label', mode === 'history' ? '只看本轮' : '查看历史');
+    }
+
+    // 摘要：channel / intent / 选了哪条记忆 / 做了什么决定，全部取自 trace payload。
+    function updateSummary(p) {
+      if (!summary || !p) return;
+      var parts = [];
+      if (p.channel) parts.push('通道 ' + p.channel);
+      if (p.intent || p.intent_cn) parts.push('意图 ' + esc(p.intent_cn || p.intent));
+      var mem = p.memory_ids || p.memories || p.chosen_memory || p.selected_memory || p.fact_text;
+      if (mem != null && mem !== '') {
+        if (Array.isArray(mem)) {
+          parts.push('记忆 ' + (mem.length ? '#' + mem.map(function (m) { return esc(m); }).join(' #') : '无'));
+        } else {
+          parts.push('记忆 ' + esc(mem));
+        }
+      }
+      if (p.decision_summary) parts.push('决定：' + esc(p.decision_summary));
+      else if (p.chosen_id) parts.push('选定 ' + esc(p.chosen_id));
+      if (parts.length) summary.textContent = '本轮 · ' + parts.join(' · ');
+    }
+
+    function loadHistory() {
+      fetch('/api/admin/cognitive-trace?limit=40', {
+        headers: token ? { 'X-Admin-Token': token } : {}
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          historyNodes = (d && Array.isArray(d.items)) ? d.items : [];
+          // 最新一条 kind=trace 含 channel/intent/memory_ids/decision_summary，用它填摘要。
+          for (var i = 0; i < historyNodes.length; i++) {
+            if (historyNodes[i].kind === 'trace') {
+              updateSummary(asObj(historyNodes[i].payload));
+              break;
+            }
+          }
+          if (mode === 'history') render();
+        })
+        .catch(function () {
+          if (mode === 'history') box.innerHTML = emptyHtml();
+        });
+    }
+
+    // SSE：独立订阅 live 流；只认带 trace_id 的认知白名单事件，实时插到本轮面板顶部。
+    var es = new EventSource('/api/admin/live/stream?token=' + encodeURIComponent(token));
+    es.onmessage = function (ev) {
+      var d;
+      try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (!d || !d.trace_id || !COG_KINDS[d.kind]) return;
+      liveNodes.unshift(d);
+      if (liveNodes.length > 60) liveNodes.length = 60;
+      updateSummary(payloadOf(d));
+      if (mode !== 'live') return; // 历史视图不打断用户浏览，事件先攒着
+      if (box.querySelector('.cog-empty')) box.innerHTML = '';
+      var wrap = document.createElement('div');
+      wrap.innerHTML = nodeHtml(d, true);
+      var el = wrap.firstChild;
+      if (!el) return;
+      box.insertBefore(el, box.firstChild);
+      // 实时到达的节点做一次淡入下滑，让“刚刚发生”看得见（T36 的 .pulse 已给左侧蓝边）。
+      if (el.animate) {
+        try {
+          el.animate(
+            [{ opacity: 0, transform: 'translateY(-6px)' }, { opacity: 1, transform: 'translateY(0)' }],
+            { duration: 420, easing: 'ease-out' }
+          );
+        } catch (e) { /* 老浏览器忽略动画 */ }
+      }
+      while (box.children.length > 60) box.removeChild(box.lastChild);
+    };
+
+    if (historyBtn) {
+      historyBtn.addEventListener('click', function () {
+        mode = (mode === 'live') ? 'history' : 'live';
+        syncBtn();
+        if (mode === 'history') loadHistory(); // 每次点历史都重拉，重启后仍查得到
+        else render();
+      });
+    }
+
+    syncBtn();
+    render();
+    loadHistory(); // 启动即拉一次：填摘要；视图仍停在本轮，不抢实时画面
   })();
 })();

@@ -55,11 +55,29 @@ def emit(kind: str, **data: Any) -> None:
         if loop is not None and loop.is_running():
             loop.call_soon_threadsafe(_deliver, ev)
         elif not _subs:
-            return
+            pass
         else:
             _deliver(ev)
     except Exception:
         pass
+    # V2.5：带 trace_id 的认知事件异步落库（重启不丢，块⑤核心）。
+    # 只有认知白名单内的 kind 才落库；其余事件（turn_start/judge/intent…）仍带
+    # trace_id 供 SSE 透传，但不走 tmod.write——trace 对非白名单 kind 会打
+    # WARNING，每轮对话刷屏。白名单以 trace._KINDS 为准（只读，避免两处维护）。
+    if ev.get("trace_id"):
+        try:
+            from brain.cognitive import trace as tmod
+            if str(kind) in getattr(tmod, "_KINDS", ()):
+                tmod.write(
+                    kind=str(kind),
+                    user_id=str(ev.get("user_id") or "default"),
+                    trace_id=str(ev["trace_id"]),
+                    payload={k: v for k, v in ev.items() if k not in ("t", "kind")},
+                    node_type=str(ev.get("node_type") or "activity"),
+                    turn_id=ev.get("turn_id"),
+                )
+        except Exception:
+            pass
 
 
 def recent(limit: int = _REPLAY) -> list[dict[str, Any]]:
@@ -94,3 +112,29 @@ async def subscribe() -> AsyncIterator[dict[str, Any]]:
 
 def sse_frame(ev: dict[str, Any]) -> str:
     return "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
+
+
+async def subscribe_with_heartbeat(interval: float = 15.0) -> AsyncIterator[dict[str, Any]]:
+    """队列 get + 定时哨兵心跳；超时只发心跳，绝不取消底层生成器。"""
+    if len(_subs) >= _MAX_SUBS:
+        try:
+            _subs.pop()
+        except Exception:
+            pass
+    q: asyncio.Queue = asyncio.Queue(maxsize=200)
+    _subs.add(q)
+    try:
+        for ev in recent():
+            try:
+                q.put_nowait(ev)
+            except Exception:
+                break
+        while True:
+            try:
+                ev = await asyncio.wait_for(q.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield {"kind": "heartbeat"}   # 哨兵，由路由翻译成注释帧
+                continue
+            yield ev
+    finally:
+        _subs.discard(q)

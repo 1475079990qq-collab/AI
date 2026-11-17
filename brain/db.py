@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,16 @@ DEFAULT_PARAMS: dict[str, str] = {
     "memory_top_k": "3",
     "emotion_min_intensity": "0.6",
     "gpu_exclusive": "1",
+    # V2.5
+    "channel_enabled": "1",
+    "channel_high_intensity": "0.75",
+    "channel_risk_words": "钱,转账,健康,病,隐私,删除,离婚,离职,投资,合同",
+    "channel_deep_phrases": "想清楚,认真想,仔细考虑,权衡,想明白",
+    "trace_recent_limit": "40",
+    "decay_every_turns": "20",
+    "eval_window_turns": "10",
+    "feedback_weight_delta": "0.05",
+    "v25_orchestrator_enabled": "1",
 }
 
 _SCHEMA = """
@@ -207,6 +218,139 @@ CREATE TABLE IF NOT EXISTS tone_samples (
     intensity     REAL NOT NULL DEFAULT 0,
     note          TEXT NOT NULL DEFAULT ''
 );
+
+-- 神经元：脑图上的一颗点就是一个真实节点（事实 / 概念 / 教训 / 策略）。
+-- 属性照 V2 契约：importance、confidence、activation、activation_count、last_activated。
+CREATE TABLE IF NOT EXISTS neurons (
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL,
+    kind             TEXT NOT NULL,
+    ref_id           TEXT NOT NULL DEFAULT '',
+    label            TEXT NOT NULL DEFAULT '',
+    text             TEXT NOT NULL DEFAULT '',
+    importance       REAL NOT NULL DEFAULT 0.5,
+    confidence       REAL NOT NULL DEFAULT 0.5,
+    activation       REAL NOT NULL DEFAULT 0,
+    activation_count INTEGER NOT NULL DEFAULT 0,
+    last_activated   TEXT,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_neurons_user ON neurons(user_id, kind);
+
+-- 突触：有方向的真实关系。relation ∈ about / cooccur / semantic / lesson / strategy。
+CREATE TABLE IF NOT EXISTS synapses (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          TEXT NOT NULL,
+    src              TEXT NOT NULL,
+    dst              TEXT NOT NULL,
+    relation         TEXT NOT NULL,
+    weight           REAL NOT NULL DEFAULT 0.3,
+    activation_count INTEGER NOT NULL DEFAULT 0,
+    last_activated   TEXT,
+    created_at       TEXT NOT NULL,
+    UNIQUE(user_id, src, dst, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_syn_src ON synapses(user_id, src);
+CREATE INDEX IF NOT EXISTS idx_syn_dst ON synapses(user_id, dst);
+
+-- 激活记录：哪一轮点亮了哪些神经元。可回放，不是动画。
+CREATE TABLE IF NOT EXISTS activations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    request_id TEXT,
+    user_id    TEXT,
+    neuron_id  TEXT NOT NULL,
+    energy     REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_act_req ON activations(request_id);
+
+-- 策略：候选 → 启用 → 回滚。策略不是人格，是一组带证据的行为参数。
+CREATE TABLE IF NOT EXISTS strategies (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT NOT NULL,
+    name       TEXT NOT NULL,
+    text       TEXT NOT NULL DEFAULT '',
+    evidence   INTEGER NOT NULL DEFAULT 0,
+    success    INTEGER NOT NULL DEFAULT 0,
+    failure    INTEGER NOT NULL DEFAULT 0,
+    status     TEXT NOT NULL DEFAULT 'candidate',
+    version    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(user_id, name, version)
+);
+
+-- V2.5：agent 情绪状态（每用户一行，valence/arousal/energy/stance）
+CREATE TABLE IF NOT EXISTS agent_state (
+    user_id     TEXT PRIMARY KEY,
+    valence     REAL NOT NULL DEFAULT 0.0,
+    arousal     REAL NOT NULL DEFAULT 0.0,
+    energy      REAL NOT NULL DEFAULT 0.5,
+    stance      TEXT NOT NULL DEFAULT 'steady',
+    updated_at  TEXT NOT NULL
+);
+-- V2.5：目标（inferred / explicit，候选 → 活跃 → 完成/暂停）
+CREATE TABLE IF NOT EXISTS goals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'paused',
+    source      TEXT NOT NULL DEFAULT 'inferred',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_goals_user_status ON goals(user_id, status);
+-- V2.5：知识来源（带信任度，供信念溯源）
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     TEXT NOT NULL,
+    uri         TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL DEFAULT 'unknown',
+    trust       REAL NOT NULL DEFAULT 0.5,
+    fetched_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ks_user_kind ON knowledge_sources(user_id, kind);
+-- V2.5：信念（可被新证据取代，superseded_by 指向更新的一条）
+CREATE TABLE IF NOT EXISTS beliefs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT NOT NULL,
+    subject       TEXT NOT NULL,
+    predicate     TEXT NOT NULL DEFAULT '',
+    object        TEXT NOT NULL,
+    confidence    REAL NOT NULL DEFAULT 0.5,
+    source_id     INTEGER REFERENCES knowledge_sources(id),
+    superseded_by INTEGER REFERENCES beliefs(id),
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_beliefs_user_subject ON beliefs(user_id, subject);
+CREATE INDEX IF NOT EXISTS idx_beliefs_source ON beliefs(source_id);
+-- V2.5：认知轨迹（每轮怎么想，trace_id 聚合，重启不丢）
+CREATE TABLE IF NOT EXISTS cognitive_trace (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id    TEXT NOT NULL,
+    user_id     TEXT NOT NULL,
+    turn_id     INTEGER,
+    kind        TEXT NOT NULL,
+    node_type   TEXT NOT NULL DEFAULT 'activity',
+    payload     TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ct_trace ON cognitive_trace(trace_id);
+CREATE INDEX IF NOT EXISTS idx_ct_user_id ON cognitive_trace(user_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_ct_kind ON cognitive_trace(kind);
+CREATE INDEX IF NOT EXISTS idx_ct_node_type ON cognitive_trace(node_type);
+-- V2.5：策略评估结果（策略在某窗口内的前后分数与去留决策）
+CREATE TABLE IF NOT EXISTS evaluation_results (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT NOT NULL,
+    strategy      TEXT NOT NULL,
+    window        TEXT NOT NULL DEFAULT '',
+    before_score  REAL NOT NULL DEFAULT 0.0,
+    after_score   REAL NOT NULL DEFAULT 0.0,
+    decision      TEXT NOT NULL DEFAULT 'keep',
+    created_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_er_user_strategy ON evaluation_results(user_id, strategy);
 """
 
 
@@ -214,16 +358,57 @@ def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# WAL 切换必须在「建业务连接之前」串行完成：若把切换放进每个 connect()，
+# 多线程/进程各自第一次连新库会同时切 WAL，撞锁的同时连接会拿到旧 pager 状态，
+# 后续 INSERT 报 "attempt to write a readonly database"（trace 写入就栽在这）。
+_WAL_INIT_LOCK = threading.Lock()
+# 每个库路径保留一个常驻引导连接，维持 WAL 索引文件稳定。
+_WAL_KEEPERS: dict[str, sqlite3.Connection] = {}
+
+
+def _ensure_wal(path: str) -> None:
+    """每库路径只初始化一次 WAL；撞锁重试，仍失败就沿用当前模式，不致命。"""
+    if path in _WAL_KEEPERS:
+        return
+    with _WAL_INIT_LOCK:
+        if path in _WAL_KEEPERS:
+            return
+        boot = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
+        for attempt in range(3):
+            try:
+                mode = boot.execute("PRAGMA journal_mode").fetchone()
+                if mode and str(mode[0]).lower() != "wal":
+                    boot.execute("PRAGMA journal_mode=WAL").fetchone()
+                # 切到 WAL 后必须做一次真实写入来初始化 -wal/-shm 索引文件，
+                # 否则后续并发新连接会拿到只读态，INSERT 报
+                # "attempt to write a readonly database"。写回原值即无害 no-op。
+                uv = boot.execute("PRAGMA user_version").fetchone()[0]
+                boot.execute(f"PRAGMA user_version={uv}")
+                break
+            except sqlite3.OperationalError:
+                # PRAGMA 撞锁失败后可能停在未完成事务态，清掉再短退避重试。
+                try:
+                    boot.rollback()
+                except sqlite3.OperationalError:
+                    pass
+                if attempt < 2:
+                    time.sleep(0.01 * (attempt + 1))
+        # 不关闭 boot：常驻维持 WAL 文件，避免最后一个连接关闭删掉 WAL 索引。
+        _WAL_KEEPERS[path] = boot
+
+
 def connect() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_DB_PATH), timeout=10.0, check_same_thread=False)
+    path = str(_DB_PATH)
+    # WAL 在独立引导连接上一次性切好并初始化，业务连接只做普通打开，
+    # 避免并发首次连库时各自切 WAL 撞锁、或拿到只读 pager 态。
+    _ensure_wal(path)
+    conn = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    # 兜底：返回的连接不在未提交事务中。
     try:
-        mode = conn.execute("PRAGMA journal_mode").fetchone()
-        if mode and str(mode[0]).lower() != "wal":
-            conn.execute("PRAGMA journal_mode=WAL")
+        conn.rollback()
     except sqlite3.OperationalError:
-        # 并发初始化时切 WAL 可能撞锁；失败就沿用当前模式，不致命
         pass
     conn.execute("PRAGMA busy_timeout=8000")
     return conn
@@ -258,6 +443,18 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _add_column(conn, "lessons", "how", "TEXT NOT NULL DEFAULT ''")
     _add_column(conn, "lessons", "confidence", "REAL NOT NULL DEFAULT 0")
     _add_column(conn, "lessons", "degrade_reason", "TEXT NOT NULL DEFAULT ''")
+    # V2：教训不再是平权的「最近三条」，而是带权重和成败计数的经验。
+    _add_column(conn, "lessons", "weight", "REAL NOT NULL DEFAULT 0.5")
+    _add_column(conn, "lessons", "uses", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "lessons", "success", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "lessons", "failure", "INTEGER NOT NULL DEFAULT 0")
+    # V2：事实不再全是同权重的原话，写进来时就有类型和重要程度。
+    _add_column(conn, "facts", "kind", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "facts", "importance", "REAL NOT NULL DEFAULT 0.5")
+    _add_column(conn, "facts", "confidence", "REAL NOT NULL DEFAULT 0.5")
+    _add_column(conn, "facts", "activation", "REAL NOT NULL DEFAULT 0")
+    _add_column(conn, "facts", "activation_count", "INTEGER NOT NULL DEFAULT 0")
+    _add_column(conn, "facts", "last_activated", "TEXT")
 
 
 def init_db() -> None:
@@ -530,14 +727,22 @@ def list_judge_logs(limit: int = 100) -> list[dict]:
 # ---------- 事实记忆兜底 ----------
 
 def add_fact(*, fact_id: str, user_id: str, session_id: str, text: str,
-             metadata: dict | None = None) -> str:
+             metadata: dict | None = None, kind: str = "",
+             importance: float = 0.5, confidence: float = 0.5) -> str:
+    """写一条事实。kind/importance/confidence 由写入侧判定，回读时参与排序。
+
+    为什么带这三个属性：以前的 71 条事实权重全一样，「今天吃了什么」和
+    「他忌口不吃香菜」在召回里并列，人的记忆不是这样排的。
+    """
     conn = connect()
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO facts(id,user_id,session_id,text,metadata,created_at) "
-            "VALUES(?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO facts(id,user_id,session_id,text,metadata,created_at,"
+            "kind,importance,confidence,activation,activation_count) "
+            "VALUES(?,?,?,?,?,?,?,?,?,0,0)",
             (fact_id, user_id, session_id, text,
-             json.dumps(metadata or {}, ensure_ascii=False), _now()),
+             json.dumps(metadata or {}, ensure_ascii=False), _now(),
+             str(kind or ""), float(importance), float(confidence)),
         )
         conn.commit()
         return fact_id
@@ -553,17 +758,20 @@ def _bigrams(text: str) -> set[str]:
 
 
 def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
-    """人不会只用一种线索回忆：词像、最近说过、带着情绪，三路一起上来。
+    """人不会只用一种线索回忆：词像、最近说过、带着情绪、这件事有多重要，四路一起上。
 
     - 词重合：本轮 query 与事实共享的两字词比例（原来的唯一路径）
     - 最近说过：越新的事越容易被想起（权重低，只做次级线索）
     - 带情绪：metadata 里记过情绪的，容易被同类话题勾出来
-    score 仍以词重合为主，后两项只加分；`why` 记录这一条是被哪条线索捞回来的。
+    - 重要程度：写入侧判过 importance 的事（身份 / 偏好 / 忌口 / 长期目标）
+      会稳定压过「今天吃了什么」这种流水；越常被想起的（activation）再加一点。
+    score 以词重合为主，其余只加分；`why` 记录这一条是被哪条线索捞回来的。
     """
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT id,user_id,session_id,text,metadata FROM facts "
+            "SELECT id,user_id,session_id,text,metadata,kind,importance,confidence,"
+            "activation,activation_count FROM facts "
             "WHERE user_id=? ORDER BY created_at DESC, id DESC LIMIT 200",
             (user_id,),
         ).fetchall()
@@ -579,7 +787,15 @@ def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
         sim = len(qb & fb) / max(1, len(qb))
         recent = 1.0 - (idx / total)               # 1.0 = 最新那条
         emo = 0.18 if '"emotion"' in (row["metadata"] or "") else 0.0
-        if sim <= 0 and recent < 0.55:
+        try:
+            imp = max(0.0, min(1.0, float(row["importance"] or 0.5)))
+        except (TypeError, ValueError):
+            imp = 0.5
+        try:
+            act = max(0.0, min(1.0, float(row["activation"] or 0.0)))
+        except (TypeError, ValueError):
+            act = 0.0
+        if sim <= 0 and recent < 0.55 and not (imp >= 0.85 and recent >= 0.15):
             continue
         why: list[str] = []
         if sim > 0:
@@ -588,9 +804,14 @@ def search_facts(user_id: str, query: str, top_k: int = 3) -> list[dict]:
             why.append("最近说过")
         if emo:
             why.append("带情绪")
+        if imp >= 0.75:
+            why.append("重要记忆")
+        if act >= 0.5:
+            why.append("常被想起")
         scored.append({
-            "id": row["id"], "text": row["text"],
-            "score": round(sim + recent * 0.22 + emo, 4),
+            "id": row["id"], "text": row["text"], "kind": str(row["kind"] or ""),
+            "importance": round(imp, 3), "confidence": round(float(row["confidence"] or 0.5), 3),
+            "score": round(sim + recent * 0.22 + emo + imp * 0.30 + act * 0.15, 4),
             "sim": round(sim, 4), "why": why,
             "metadata": row["metadata"],
         })
@@ -815,47 +1036,54 @@ def _note_similar(a: str, b: str) -> float:
 def add_lesson(*, user_id: str, request_id: str, kind: str, note: str,
                verdict: str = "", keep: int = 200, source: str = "rule",
                why: str = "", how: str = "", confidence: float = 0.0,
-               degrade_reason: str = "") -> tuple[int, bool]:
+               degrade_reason: str = "", weight: float = 0.5) -> tuple[int, bool]:
     """记一条复盘经验；同用户同类型（或文本高度相近）的旧教训直接合并更新。
 
     返回 (lesson_id, merged)：merged=True 表示没有新增行，而是更新了旧教训。
     只留最近 keep 条，避免无限堆积。既有列 id/created_at/user_id/request_id/
     kind/note/verdict 一个不少，新增列只做补充。
+
+    weight 是「这条经验现在有多值得听」：同类问题再犯一次就加固一点，
+    反馈说「不对」时由 evolution 侧下调。prompt 侧按 weight 取前三条。
     """
     note = str(note or "").strip()
     conn = connect()
     try:
         rows = conn.execute(
-            "SELECT id, kind, note FROM lessons WHERE user_id=? "
+            "SELECT id, kind, note, weight FROM lessons WHERE user_id=? "
             "ORDER BY id DESC LIMIT 30", (str(user_id),),
         ).fetchall()
         merged_id: int | None = None
+        merged_weight = float(weight or 0.5)
         for r in rows:
             if str(r["kind"]) == str(kind):
                 merged_id = int(r["id"])
+                merged_weight = min(1.0, max(float(r["weight"] or 0.5), merged_weight) + 0.05)
                 break
         if merged_id is None:
             for r in rows:
                 if _note_similar(str(r["note"] or ""), note) >= 0.8:
                     merged_id = int(r["id"])
+                    merged_weight = min(1.0, max(float(r["weight"] or 0.5), merged_weight) + 0.05)
                     break
         if merged_id is not None:
             conn.execute(
                 "UPDATE lessons SET request_id=?, kind=?, note=?, verdict=?, source=?, "
-                "why=?, how=?, confidence=?, degrade_reason=?, created_at=? WHERE id=?",
+                "why=?, how=?, confidence=?, degrade_reason=?, weight=?, uses=uses+1, "
+                "created_at=? WHERE id=?",
                 (str(request_id), str(kind), note, str(verdict), str(source or "rule"),
                  str(why or ""), str(how or ""), float(confidence or 0.0),
-                 str(degrade_reason or ""), _now(), merged_id),
+                 str(degrade_reason or ""), float(merged_weight), _now(), merged_id),
             )
             conn.commit()
             return merged_id, True
         cur = conn.execute(
             "INSERT INTO lessons(created_at,user_id,request_id,kind,note,verdict,"
-            "source,why,how,confidence,degrade_reason) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "source,why,how,confidence,degrade_reason,weight,uses) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)",
             (_now(), str(user_id), str(request_id), str(kind), note, str(verdict),
              str(source or "rule"), str(why or ""), str(how or ""),
-             float(confidence or 0.0), str(degrade_reason or "")),
+             float(confidence or 0.0), str(degrade_reason or ""), float(weight or 0.5)),
         )
         conn.execute(
             "DELETE FROM lessons WHERE id <= (SELECT id FROM lessons ORDER BY id DESC LIMIT 1 OFFSET ?)",
@@ -875,6 +1103,52 @@ def list_lessons(user_id: str, limit: int = 3) -> list[dict]:
             (str(user_id), int(limit)),
         ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def lessons_for_prompt(user_id: str, limit: int = 3) -> list[dict]:
+    """进提示词的那几条经验：按权重，不按时间。
+
+    以前是「最近三条」——最新的一条哪怕只出现过一次，也会压过反复验证过的老经验。
+    现在 weight 高（反复加固 + 反馈认可）的先上，同权重再按新。
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM lessons WHERE user_id=? ORDER BY weight DESC, id DESC LIMIT ?",
+            (str(user_id), int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def bump_lesson_outcome(*, user_id: str, request_id: str, ok: bool,
+                        delta_good: float = 0.06, delta_bad: float = 0.12) -> dict | None:
+    """用户对某一轮的表态，落回到那一轮学到的经验上。
+
+    说「对了」→ 这条经验被验证（weight 微涨）；说「不对」→ 这条经验可能带偏了
+    （weight 明显下调）。反复不行的那条会被降到底，自然退出提示词前排。
+    """
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM lessons WHERE user_id=? AND request_id=? "
+            "ORDER BY id DESC LIMIT 1", (str(user_id), str(request_id)),
+        ).fetchone()
+        if row is None:
+            return None
+        w = float(row["weight"] or 0.5)
+        w = min(1.0, w + delta_good) if ok else max(0.05, w - delta_bad)
+        succ = int(row["success"] or 0) + (1 if ok else 0)
+        fail = int(row["failure"] or 0) + (0 if ok else 1)
+        conn.execute(
+            "UPDATE lessons SET weight=?, success=?, failure=? WHERE id=?",
+            (round(w, 3), succ, fail, int(row["id"])),
+        )
+        conn.commit()
+        return dict(row, weight=round(w, 3), success=succ, failure=fail)
     finally:
         conn.close()
 
@@ -1174,5 +1448,699 @@ def last_turn_at(user_id: str) -> str:
             "SELECT MAX(created_at) FROM turn_logs WHERE user_id=?", (str(user_id or ""),),
         ).fetchone()
         return str(row[0] or "") if row else ""
+    finally:
+        conn.close()
+
+
+def turn_meta(request_id: str) -> dict:
+    """按 request_id 取这一轮的真实记录（反馈落权重时要用 user_id 和召回证据）。"""
+    req = str(request_id or "").strip()
+    if not req:
+        return {}
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM turn_logs WHERE request_id=? ORDER BY id DESC LIMIT 1", (req,),
+        ).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def adjust_fact_importances(fact_ids: list[str], delta: float) -> int:
+    """反馈落到记忆权重上：说对了，这几条记忆更可信；说不对，先降一点。"""
+    ids = [str(x) for x in (fact_ids or []) if str(x).strip()]
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    conn = connect()
+    try:
+        cur = conn.execute(
+            f"UPDATE facts SET importance=MAX(0.05, MIN(1.0, importance+?)) "
+            f"WHERE id IN ({marks})", tuple([float(delta)] + ids),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    finally:
+        conn.close()
+
+
+def activated_facts(request_id: str) -> list[str]:
+    """这一轮点亮了哪些事实节点（从 activations 反查，用于反馈回溯）。"""
+    req = str(request_id or "").strip()
+    if not req:
+        return []
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT neuron_id FROM activations WHERE request_id=?", (req,),
+        ).fetchall()
+        out = []
+        for r in rows:
+            nid = str(r["neuron_id"] or "")
+            if nid.startswith("n_fact_"):
+                out.append(nid[len("n_fact_"):])
+        return out
+    finally:
+        conn.close()
+
+
+# ---------- 神经元 / 突触 / 激活（V2 神经网络） ----------
+# 这一层的规矩：脑图上的每一次亮起，都要能查到是哪一颗、为什么亮。
+# 只有 facts 表的时候，一条事实就是一行文本；有了 neurons，它才是一个「节点」。
+
+def neuron_upsert(*, neuron_id: str, user_id: str, kind: str, ref_id: str = "",
+                  label: str = "", text: str = "", importance: float = 0.5,
+                  confidence: float = 0.5) -> str:
+    """建一颗神经元；已存在时只涨不跌（importance/confidence 取大者）。
+
+    为什么取大者：同一条事实可能被再次提到，再提到应该让它更重要，
+    而不是把之前的判断抹平；activation 与计数一个都不重置。
+    """
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO neurons(id,user_id,kind,ref_id,label,text,importance,confidence,"
+            "activation,activation_count,created_at) VALUES(?,?,?,?,?,?,?,?,0,0,?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "label=excluded.label, text=excluded.text, ref_id=excluded.ref_id, "
+            "importance=MAX(neurons.importance, excluded.importance), "
+            "confidence=MAX(neurons.confidence, excluded.confidence)",
+            (str(neuron_id), str(user_id), str(kind), str(ref_id or ""),
+             str(label or "")[:60], str(text or "")[:400],
+             float(importance), float(confidence), _now()),
+        )
+        conn.commit()
+        return str(neuron_id)
+    finally:
+        conn.close()
+
+
+def neuron_get(neuron_id: str) -> dict | None:
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM neurons WHERE id=?", (str(neuron_id),)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def neuron_labels(neuron_ids: list[str]) -> dict[str, dict]:
+    """一次取回一批节点的 label/kind（激活扩散时别为每颗开一次连接）。"""
+    ids = [str(x) for x in (neuron_ids or []) if str(x).strip()]
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            f"SELECT id,label,kind,importance,activation FROM neurons "
+            f"WHERE id IN ({marks})", tuple(ids),
+        ).fetchall()
+        return {str(r["id"]): dict(r) for r in rows}
+    finally:
+        conn.close()
+
+
+def list_neurons(user_id: str | None = None, kind: str | None = None,
+                 limit: int = 5000) -> list[dict]:
+    sql = "SELECT * FROM neurons WHERE 1=1"
+    args: list[Any] = []
+    if user_id:
+        sql += " AND user_id=?"
+        args.append(str(user_id))
+    if kind:
+        sql += " AND kind=?"
+        args.append(str(kind))
+    sql += " ORDER BY importance DESC, id DESC LIMIT ?"
+    args.append(int(limit))
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+
+def neuron_stats(user_id: str | None = None) -> dict:
+    sql = "SELECT kind, COUNT(*) AS n FROM neurons"
+    args: list[Any] = []
+    if user_id:
+        sql += " WHERE user_id=?"
+        args.append(str(user_id))
+    sql += " GROUP BY kind"
+    conn = connect()
+    try:
+        rows = conn.execute(sql, args).fetchall()
+        syn = conn.execute("SELECT COUNT(*) FROM synapses" +
+                           (" WHERE user_id=?" if user_id else ""),
+                           ([str(user_id)] if user_id else [])).fetchone()
+        return {"by_kind": {str(r["kind"]): int(r["n"]) for r in rows},
+                "neurons": sum(int(r["n"]) for r in rows),
+                "synapses": int(syn[0] or 0)}
+    finally:
+        conn.close()
+
+
+def synapse_upsert(*, user_id: str, src: str, dst: str, relation: str,
+                   weight: float = 0.3, delta: float = 0.03) -> None:
+    """建一条突触；重复建就按 delta 强化（权重只涨不跌，封顶 1.0）。
+
+    V2.5 修正：默认 delta 从 0 改为 0.03 —— 之前重复建边不强化，"用进"失效。
+    """
+    if not src or not dst or src == dst:
+        return
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO synapses(user_id,src,dst,relation,weight,activation_count,created_at) "
+            "VALUES(?,?,?,?,?,0,?) "
+            "ON CONFLICT(user_id,src,dst,relation) DO UPDATE SET "
+            "weight=MIN(1.0, MAX(synapses.weight, excluded.weight) + ?)",
+            (str(user_id), str(src), str(dst), str(relation),
+             max(0.0, min(1.0, float(weight))), _now(), max(0.0, float(delta))),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_synapses(user_id: str | None = None, limit: int = 4000,
+                  min_weight: float = 0.0) -> list[dict]:
+    """整张图的突触（前端画真实关系用；按权重从高到低取，超量只截尾）。"""
+    sql = "SELECT src,dst,relation,weight,activation_count FROM synapses WHERE 1=1"
+    args: list[Any] = []
+    if user_id:
+        sql += " AND user_id=?"
+        args.append(str(user_id))
+    if min_weight > 0:
+        sql += " AND weight>=?"
+        args.append(float(min_weight))
+    sql += " ORDER BY weight DESC, activation_count DESC LIMIT ?"
+    args.append(int(limit))
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+
+def synapse_neighbors(user_id: str, neuron_ids: list[str],
+                      limit: int = 12) -> list[dict]:
+    """从一组节点出发，取权重最高的相邻突触（激活扩散只走这条）。"""
+    ids = [str(x) for x in (neuron_ids or []) if str(x).strip()]
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT src,dst,relation,weight FROM synapses "
+            f"WHERE user_id=? AND src IN ({marks}) ORDER BY weight DESC LIMIT ?",
+            tuple([str(user_id)] + ids + [int(limit)]),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def synapse_sources(user_id: str, dst_ids: list[str], relation: str | None = None,
+                    limit: int = 20) -> list[dict]:
+    """反向查询：谁连到我（概念节点找回「哪些记忆是关于它的」）。"""
+    ids = [str(x) for x in (dst_ids or []) if str(x).strip()]
+    if not ids:
+        return []
+    marks = ",".join("?" * len(ids))
+    sql = f"SELECT src,dst,relation,weight FROM synapses WHERE user_id=? AND dst IN ({marks})"
+    args: list[Any] = [str(user_id)] + ids
+    if relation:
+        sql += " AND relation=?"
+        args.append(str(relation))
+    sql += " ORDER BY weight DESC LIMIT ?"
+    args.append(int(limit))
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, tuple(args)).fetchall()]
+    finally:
+        conn.close()
+
+
+def find_facts_like(user_id: str, term: str, limit: int = 8) -> list[dict]:
+    """按字面包含查事实（概念成形的依据：同一个词出现过的所有记忆）。"""
+    if not str(term or "").strip():
+        return []
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id,text,importance FROM facts WHERE user_id=? AND text LIKE ? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (str(user_id), "%" + str(term) + "%", int(limit)),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def count_facts_like(user_id: str, term: str) -> int:
+    if not str(term or "").strip():
+        return 0
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM facts WHERE user_id=? AND text LIKE ?",
+            (str(user_id), "%" + str(term) + "%"),
+        ).fetchone()
+        return int(row[0] or 0)
+    finally:
+        conn.close()
+
+
+def list_fact_users(limit: int = 20) -> list[str]:
+    """有过长期记忆的用户（启动时给历史事实补神经节点用）。"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT user_id, COUNT(*) AS n FROM facts WHERE user_id<>'' "
+            "GROUP BY user_id ORDER BY n DESC LIMIT ?", (int(limit),),
+        ).fetchall()
+        return [str(r[0]) for r in rows if r[0]]
+    finally:
+        conn.close()
+
+
+def bump_synapses(user_id: str, pairs: list[tuple[str, str]], relation: str,
+                  delta: float = 0.03) -> None:
+    """共同激活的一对节点：连接变强一点。这就是「用进」。"""
+    pairs = [(str(a), str(b)) for a, b in (pairs or []) if str(a) and str(b) and a != b]
+    if not pairs:
+        return
+    conn = connect()
+    try:
+        conn.executemany(
+            "UPDATE synapses SET weight=MIN(1.0, weight+?), "
+            "activation_count=activation_count+1, last_activated=? "
+            "WHERE user_id=? AND src=? AND dst=? AND relation=?",
+            [(float(delta), _now(), str(user_id), a, b, str(relation))
+             for a, b in pairs],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_activations(*, user_id: str, request_id: str, items: list[dict]) -> None:
+    """把这一轮点亮的节点记账（items: [{id, energy}]），顺带涨 activation。"""
+    items = [(str(it.get("id")), float(it.get("energy") or 0.0))
+             for it in (items or []) if str(it.get("id") or "").strip()]
+    if not items:
+        return
+    conn = connect()
+    try:
+        conn.executemany(
+            "INSERT INTO activations(created_at,request_id,user_id,neuron_id,energy) "
+            "VALUES(?,?,?,?,?)",
+            [(_now(), str(request_id), str(user_id), nid, energy)
+             for nid, energy in items],
+        )
+        conn.executemany(
+            "UPDATE neurons SET activation=MIN(1.0, activation+?), "
+            "activation_count=activation_count+1, last_activated=? WHERE id=?",
+            [(min(0.5, max(0.0, energy)), _now(), nid) for nid, energy in items],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def touch_facts(fact_ids: list[str]) -> None:
+    """本轮被想起的事实：涨一点激活度（读侧只读这个值，不写热路径）。"""
+    ids = [str(x) for x in (fact_ids or []) if str(x).strip()]
+    if not ids:
+        return
+    marks = ",".join("?" * len(ids))
+    conn = connect()
+    try:
+        conn.execute(
+            f"UPDATE facts SET activation=MIN(1.0, activation+0.12), "
+            f"activation_count=activation_count+1, last_activated=? WHERE id IN ({marks})",
+            tuple([_now()] + ids),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def decay(user_id: str, neuron_half_life_days: float = 7.0,
+          synapse_half_life_days: float = 30.0, floor: float = 0.05) -> dict:
+    """衰减：长期没被激活的节点与连接慢慢变淡，但绝不被删除。
+
+    只降「激活度 / 连接权重」，不降 importance —— 重要事实仍然重要，
+    只是这一阵子不容易被想起来。这就是衰减与遗忘的区别。
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, activation, last_activated FROM neurons "
+            "WHERE user_id=? AND activation > 0.01", (str(user_id),),
+        ).fetchall()
+        now = datetime.datetime.now()
+        upd = []
+        for r in rows:
+            try:
+                last = datetime.datetime.strptime(str(r["last_activated"]), "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                continue
+            days = max(0.0, (now - last).total_seconds() / 86400.0)
+            val = float(r["activation"] or 0.0) * (0.5 ** (days / max(0.1, neuron_half_life_days)))
+            upd.append((round(val, 4), str(r["id"])))
+        if upd:
+            conn.executemany("UPDATE neurons SET activation=? WHERE id=?", upd)
+        srows = conn.execute(
+            "SELECT id, weight, last_activated FROM synapses WHERE user_id=? AND weight > ?",
+            (str(user_id), float(floor)),
+        ).fetchall()
+        supd = []
+        for r in srows:
+            try:
+                last = datetime.datetime.strptime(str(r["last_activated"] or ""), "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                last = now - datetime.timedelta(days=synapse_half_life_days * 4)
+            days = max(0.0, (now - last).total_seconds() / 86400.0)
+            val = float(r["weight"] or 0.0) * (0.5 ** (days / max(0.1, synapse_half_life_days)))
+            supd.append((round(max(float(floor), val), 4), int(r["id"])))
+        if supd:
+            conn.executemany("UPDATE synapses SET weight=? WHERE id=?", supd)
+        conn.commit()
+        return {"neurons": len(upd), "synapses": len(supd)}
+    finally:
+        conn.close()
+
+
+# ---------- 策略（V2 自我进化：候选 → 启用 → 回滚） ----------
+
+def upsert_strategy(*, user_id: str, name: str, text: str) -> dict:
+    """同名策略没有就建候选，有就累积证据；证据够了才谈启用。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? AND name=? AND status!='retired' "
+            "ORDER BY version DESC LIMIT 1", (str(user_id), str(name)),
+        ).fetchone()
+        if row is None:
+            cur = conn.execute(
+                "INSERT INTO strategies(user_id,name,text,evidence,status,version,"
+                "created_at,updated_at) VALUES(?,?,?,1,'candidate',1,?,?)",
+                (str(user_id), str(name), str(text), _now(), _now()),
+            )
+            conn.commit()
+            return {"id": int(cur.lastrowid or 0), "name": str(name), "text": str(text),
+                    "evidence": 1, "status": "candidate", "version": 1}
+        conn.execute(
+            "UPDATE strategies SET evidence=evidence+1, text=?, updated_at=? WHERE id=?",
+            (str(text), _now(), int(row["id"])),
+        )
+        conn.commit()
+        return dict(row, evidence=int(row["evidence"]) + 1, text=str(text))
+    finally:
+        conn.close()
+
+
+def record_strategy_outcome(*, user_id: str, name: str, ok: bool) -> dict | None:
+    """策略有没有用：成功一次 +1，失败一次 +1；失败多过成功就退役。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? AND name=? AND status!='retired' "
+            "ORDER BY version DESC LIMIT 1", (str(user_id), str(name)),
+        ).fetchone()
+        if row is None:
+            return None
+        succ = int(row["success"] or 0) + (1 if ok else 0)
+        fail = int(row["failure"] or 0) + (0 if ok else 1)
+        status = str(row["status"] or "candidate")
+        if status == "active" and fail >= 3 and fail > succ:
+            status = "retired"
+        conn.execute(
+            "UPDATE strategies SET success=?, failure=?, status=?, updated_at=? WHERE id=?",
+            (succ, fail, status, _now(), int(row["id"])),
+        )
+        conn.commit()
+        return dict(row, success=succ, failure=fail, status=status)
+    finally:
+        conn.close()
+
+
+def activate_strategy(*, user_id: str, name: str, version: int | None = None,
+                      min_evidence: int = 2) -> dict | None:
+    """启用一条候选策略：同用户只留一条 active，旧的回滚为 retired（可再启用）。"""
+    conn = connect()
+    try:
+        sql = ("SELECT * FROM strategies WHERE user_id=? AND name=? "
+               + ("AND version=? " if version else "AND status!='retired' ")
+               + "ORDER BY version DESC LIMIT 1")
+        args = [str(user_id), str(name)] + ([int(version)] if version else [])
+        row = conn.execute(sql, tuple(args)).fetchone()
+        if row is None or int(row["evidence"] or 0) < int(min_evidence):
+            return None
+        conn.execute("UPDATE strategies SET status='retired', updated_at=? "
+                     "WHERE user_id=? AND status='active'", (_now(), str(user_id)))
+        conn.execute("UPDATE strategies SET status='active', updated_at=? WHERE id=?",
+                     (_now(), int(row["id"])))
+        conn.commit()
+        return dict(row, status="active")
+    finally:
+        conn.close()
+
+
+def rollback_strategy(*, user_id: str, name: str) -> dict | None:
+    """回滚：把当前 active 的退役，再把上一版重新启用（没有上一版就退回无策略）。"""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? AND name=? AND status='active' "
+            "ORDER BY version DESC LIMIT 1", (str(user_id), str(name)),
+        ).fetchone()
+        if cur is None:
+            return None
+        conn.execute("UPDATE strategies SET status='retired', updated_at=? WHERE id=?",
+                     (_now(), int(cur["id"])))
+        prev = conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? AND name=? AND status='retired' "
+            "AND version < ? ORDER BY version DESC LIMIT 1",
+            (str(user_id), str(name), int(cur["version"])),
+        ).fetchone()
+        if prev is not None:
+            conn.execute("UPDATE strategies SET status='active', updated_at=? WHERE id=?",
+                         (_now(), int(prev["id"])))
+        conn.commit()
+        return {"rolled_back": int(cur["id"]),
+                "active": (dict(prev, status="active") if prev is not None else None)}
+    finally:
+        conn.close()
+
+
+def list_strategies(user_id: str, limit: int = 20) -> list[dict]:
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? ORDER BY status='active' DESC, "
+            "version DESC LIMIT ?", (str(user_id), int(limit))).fetchall()]
+    finally:
+        conn.close()
+
+
+def active_strategy(user_id: str) -> dict | None:
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM strategies WHERE user_id=? AND status='active' "
+            "ORDER BY version DESC LIMIT 1", (str(user_id),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# ---------- 知识来源与信念（块④）----------
+# 每个写 DAO 都是「单次 execute + 单次 commit」（E04）；
+# §2.4 标注的「注册来源+写 belief」「新 belief+supersede」多写同事务，
+# 由上层模块（T28 的 consolidation / verifier）在同一 conn 上组合完成。
+_SRC_KINDS = {"user_said", "local_doc", "remote_kb", "web", "unknown"}
+
+
+def add_knowledge_source(*, user_id: str, uri: str, kind: str,
+                         trust: float = 0.5) -> int | None:
+    if kind not in _SRC_KINDS:
+        return None
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO knowledge_sources(user_id,uri,kind,trust,fetched_at) VALUES(?,?,?,?,?)",
+            (str(user_id), str(uri or ""), str(kind),
+             max(0.0, min(1.0, float(trust))), _now()))
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def list_knowledge_sources(user_id: str, kind: str | None = None,
+                           limit: int = 50) -> list[dict]:
+    """查某用户的知识来源（E09：必带 user_id）。"""
+    sql = "SELECT * FROM knowledge_sources WHERE user_id=?"
+    args: list[Any] = [str(user_id)]
+    if kind:
+        sql += " AND kind=?"
+        args.append(str(kind))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+
+def add_belief(*, user_id: str, subject: str, predicate: str, object: str,
+               confidence: float = 0.5, source_id: int | None = None) -> int:
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO beliefs(user_id,subject,predicate,object,confidence,source_id,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (str(user_id), str(subject), str(predicate), str(object),
+             max(0.0, min(1.0, float(confidence))), source_id, _now()))
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def supersede_belief(*, user_id: str, old_id: int, new_id: int) -> bool:
+    """新证据不删旧信念，写 superseded_by 指向替代者（同一事务只更新）。"""
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "UPDATE beliefs SET superseded_by=? WHERE id=? AND user_id=?",
+            (int(new_id), int(old_id), str(user_id)))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_beliefs(user_id: str, subject: str | None = None, limit: int = 50) -> list[dict]:
+    """查某用户的信念（E09：必带 user_id）。"""
+    sql = "SELECT * FROM beliefs WHERE user_id=?"
+    args: list[Any] = [str(user_id)]
+    if subject:
+        sql += " AND subject=?"
+        args.append(str(subject))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+    finally:
+        conn.close()
+
+
+# ---------- 评估结果（块⑥ / 阶段 4，T38）----------
+_EVAL_DECISIONS = {"keep", "rollback"}
+
+
+def add_evaluation_result(*, user_id: str, strategy: str, window: str,
+                          before_score: float, after_score: float,
+                          decision: str) -> int:
+    """写一条策略评估结果（E09：必带 user_id）。非法 decision 归一化为 keep。"""
+    if decision not in _EVAL_DECISIONS:
+        decision = "keep"
+    conn = connect()
+    try:
+        cur = conn.execute(
+            "INSERT INTO evaluation_results(user_id,strategy,window,before_score,after_score,decision,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (str(user_id), str(strategy), str(window), float(before_score),
+             float(after_score), decision, _now()))
+        conn.commit()
+        return int(cur.lastrowid)
+    finally:
+        conn.close()
+
+
+def list_evaluation_results(user_id: str, limit: int = 20) -> list[dict]:
+    """查某用户的评估结果（E09：必带 user_id）。"""
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM evaluation_results WHERE user_id=? ORDER BY id DESC LIMIT ?",
+            (str(user_id), int(limit))).fetchall()]
+    finally:
+        conn.close()
+
+
+def apply_evaluation(*, user_id: str, strategy: str, window: str,
+                     before_score: float, after_score: float,
+                     decision: str) -> dict:
+    """单事务：写评估结果 + 按 decision 改策略状态，只 commit 一次（E04 硬约束）。
+
+    - decision='rollback'：等价于 rollback_strategy（当前 active 退役 + 上一版复活）。
+    - 其余（keep）：等价于 record_strategy_outcome(ok=True)（success +1，必要时退役）。
+
+    两步在同一 conn 上 execute，任一异常 → conn.rollback() 整批回滚，
+    不留孤儿 evaluation 行、策略状态不变。T39 必须只调本函数，不得自行拆两次写。
+    """
+    if decision not in _EVAL_DECISIONS:
+        decision = "keep"
+    conn = connect()
+    try:
+        # 第 1 步：写评估结果（与 add_evaluation_result 同构）
+        conn.execute(
+            "INSERT INTO evaluation_results(user_id,strategy,window,before_score,after_score,decision,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (str(user_id), str(strategy), str(window), float(before_score),
+             float(after_score), decision, _now()))
+        now = _now()
+
+        # 第 2 步：按 decision 改策略状态（等价 rollback_strategy / record_strategy_outcome）
+        if decision == "rollback":
+            cur = conn.execute(
+                "SELECT * FROM strategies WHERE user_id=? AND name=? AND status='active' "
+                "ORDER BY version DESC LIMIT 1", (str(user_id), str(strategy)),
+            ).fetchone()
+            if cur is not None:
+                conn.execute(
+                    "UPDATE strategies SET status='retired', updated_at=? WHERE id=?",
+                    (now, int(cur["id"])))
+                prev = conn.execute(
+                    "SELECT * FROM strategies WHERE user_id=? AND name=? AND status='retired' "
+                    "AND version < ? ORDER BY version DESC LIMIT 1",
+                    (str(user_id), str(strategy), int(cur["version"])),
+                ).fetchone()
+                if prev is not None:
+                    conn.execute(
+                        "UPDATE strategies SET status='active', updated_at=? WHERE id=?",
+                        (now, int(prev["id"])))
+        else:
+            row = conn.execute(
+                "SELECT * FROM strategies WHERE user_id=? AND name=? AND status!='retired' "
+                "ORDER BY version DESC LIMIT 1", (str(user_id), str(strategy)),
+            ).fetchone()
+            if row is not None:
+                succ = int(row["success"] or 0) + 1
+                fail = int(row["failure"] or 0)
+                status = str(row["status"] or "candidate")
+                if status == "active" and fail >= 3 and fail > succ:
+                    status = "retired"
+                conn.execute(
+                    "UPDATE strategies SET success=?, failure=?, status=?, updated_at=? WHERE id=?",
+                    (succ, fail, status, now, int(row["id"])))
+
+        # 只 commit 一次
+        conn.commit()
+        return {"strategy": str(strategy), "decision": decision,
+                "before": float(before_score), "after": float(after_score)}
+    except Exception:
+        conn.rollback()  # 整批回滚：无孤儿结果行、策略状态不变
+        raise
     finally:
         conn.close()

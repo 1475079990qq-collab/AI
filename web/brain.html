@@ -26,6 +26,7 @@
   .wrap {
     height: 100%; max-width: 1560px; margin: 0 auto; padding: 16px 22px 12px;
     display: flex; flex-direction: column; min-height: 0; gap: 12px;
+    position: relative;   /* T36：认知轨迹面板的绝对定位参照 */
   }
 
   .head { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; min-height: 34px; }
@@ -103,6 +104,59 @@
   .lesson-empty { font-size: 11px; color: #6e797d; padding: 5px 0; }
 
   .foot { flex: 0 0 auto; color: #5f696d; font-size: 10px; line-height: 1.4; }
+
+  /* ==== T36 认知轨迹观察面板（深色 · 与脑图主体统一 · 中性色板 · 无渐变）==== */
+  .cog-panel {
+    position: absolute; right: 8px; top: 52px; bottom: 80px; width: 288px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    display: flex; flex-direction: column; font-size: 13px; z-index: 20;
+    color: var(--ink); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); flex: none;
+  }
+  .cog-head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px; border-bottom: 1px solid var(--line); font-weight: 600;
+    letter-spacing: .3px;
+  }
+  .cog-head button {
+    cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    color: #93c5fd; background: rgba(255, 255, 255, .05); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 10px;
+  }
+  .cog-head button:hover { background: rgba(255, 255, 255, .12); border-color: rgba(147, 197, 253, .5); }
+  .cog-summary {
+    padding: 8px 12px; color: var(--muted); background: rgba(255, 255, 255, .03);
+    border-bottom: 1px solid var(--line); line-height: 1.5;
+  }
+  .cog-legend {
+    display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 0;
+    padding: 10px 12px; color: var(--muted); border-bottom: 1px solid var(--line);
+  }
+  .cog-legend li {
+    display: flex; align-items: center; gap: 5px; white-space: nowrap;
+    background: rgba(255, 255, 255, .05); border: 1px solid var(--line);
+    border-radius: 6px; padding: 3px 7px; font-size: 12px;
+  }
+  .cog-legend svg { width: 16px; height: 16px; }
+  /* 四类节点：中性色、无渐变（蓝 / 绿 / 琥珀 / 青）；深底板由 .cog-legend li 提供以保可辨 */
+  .nd-structure { color: #2563eb; }
+  .nd-memory    { color: #059669; }
+  .nd-activity  { color: #d97706; }
+  .nd-emergent  { color: #0891b2; }
+  .cog-nodes { flex: 1; overflow: auto; padding: 4px 12px; }
+  .cog-node {
+    display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
+    border-bottom: 1px dashed var(--line); color: var(--ink);
+  }
+  .cog-node svg { width: 18px; height: 18px; flex: none; }
+  .cog-node small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .cog-node.pulse { border-left: 2px solid var(--accent); padding-left: 6px; }
+  /* 窄屏：面板收起为脑图下方的整行块 */
+  @media (max-width: 720px) {
+    .cog-panel {
+      position: static; width: auto; height: 240px; margin: 8px;
+      box-shadow: none;
+    }
+  }
 </style>
 </head>
 <body>
@@ -144,10 +198,34 @@
     </div>
   </div>
 
+  <!-- T36：认知轨迹面板四类节点内联 SVG symbol（禁 emoji、禁紫粉渐变） -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="ic-structure" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="ic-memory" viewBox="0 0 24 24"><path d="M4 6h16v12H4z M8 10h8" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="ic-activity" viewBox="0 0 24 24"><path d="M3 12h4l2-6 4 12 2-6h6" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+    <symbol id="ic-emergent" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3" stroke="currentColor" stroke-width="2"/></symbol>
+  </svg>
+
+  <aside id="cog-panel" class="cog-panel">
+    <div class="cog-head">
+      <span>认知轨迹</span>
+      <button id="cog-history" type="button" aria-label="查看历史">历史</button>
+    </div>
+    <div id="cog-summary" class="cog-summary">本轮摘要将显示在这里</div>
+    <ul id="cog-legend" class="cog-legend">
+      <li><svg class="nd-structure"><use href="#ic-structure"/></svg>结构节点</li>
+      <li><svg class="nd-memory"><use href="#ic-memory"/></svg>真实记忆</li>
+      <li><svg class="nd-activity"><use href="#ic-activity"/></svg>活动节点</li>
+      <li><svg class="nd-emergent"><use href="#ic-emergent"/></svg>新生节点</li>
+    </ul>
+    <div id="cog-nodes" class="cog-nodes"></div>
+  </aside>
+
   <div class="foot">
     位置 = 固定的脑形编组（听见 → 情绪 → 回忆 → 联想 → 判断 → 表达 → 反思 → 沉淀），不随数据乱跑。<br>
+    节点来自后端的 neurons 表：事实在回忆区、教训在沉淀区、概念词在联想区；线来自 synapses 表：记忆→概念（青）、记忆↔记忆（紫）、概念↔概念（蓝）、教训→概念（黄），越常被用上越粗。<br>
     亮起来自真实事件：他说了什么、读到什么情绪、想起哪条旧事、牵出哪个词、拿了什么主意、正在说出的字、说完回头看了什么、留下了什么；停下来后按真实时刻留余辉，不凭空造脉冲。<br>
-    记忆不是整片一起亮：先点亮这轮真正召回的那几条事实，再顺着「共享两字词」的联想带出一串；想起过的事余温更久（约 5 秒），其余约 1.9 秒。按「定格」可停住衰减，数清刚亮了哪一片。<br>
+    记忆不是整片一起亮：这轮召回点名了哪几条，就点亮那几颗，再顺着真实突触带出一串；想起过的事余温更久（约 5 秒），其余约 1.9 秒。按「定格」可停住衰减，数清刚亮了哪一片。<br>
     拼上下文、合成语音、落库这些后台工序不上画布，只在「最近事件」里以灰字记一笔；说完之后的复盘会写成一条「下次怎么改」。
   </div>
 </div>

@@ -8,6 +8,10 @@ __pycache__/
 *.pyc
 *.apk
 *.log
+*.err
+*.rar
+_audit_final/
+_audit_t36/
 _s_*.png
 _shot_*.png
 _run.txt

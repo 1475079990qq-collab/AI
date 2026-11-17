@@ -3,8 +3,27 @@
   "use strict";
 
   var timer = null;
+  var LS_TOKEN = "companion.admin_token";
+  var lastStatus = null;  // 缓存最近一次 /status，供「开始训练」前置拦截使用
 
   function el(id) { return document.getElementById(id); }
+
+  // 管理口令：优先取页面输入框的值，否则读 localStorage（与控制台同源）。
+  function getToken() {
+    var box = el("adminToken");
+    var t = (box && box.value) || "";
+    try { return t || localStorage.getItem(LS_TOKEN) || ""; } catch (e) { return t; }
+  }
+  function headers() {
+    var h = { "Content-Type": "application/json" };
+    var t = getToken();
+    if (t) { h["X-Admin-Token"] = t; }
+    return h;
+  }
+  function getJson(url) {
+    return fetch(url, { headers: { "Accept": "application/json", "X-Admin-Token": getToken() } })
+      .then(function (r) { return r.json(); });
+  }
 
   function tag(text, kind) {
     return '<span class="tag ' + (kind || "ok") + '">' + text + "</span>";
@@ -35,7 +54,9 @@
       row("依赖", depText),
       row("口吻语料", s.samples + " 条"),
       row("训练集", s.dataset.train + " 条 / 验证 " + s.dataset.valid + " 条 " +
-          (s.dataset.ready ? tag("够起步", "ok") : tag("未到 200 条", "warn"))),
+          (s.samples_ready === false
+            ? tag("样本不足", "warn") + " " + (s.reason || "请先补充语料")
+            : (s.dataset.ready ? tag("够起步", "ok") : tag("未到 200 条", "warn")))),
       row("llama.cpp", llamaText),
     ].join("");
   }
@@ -87,7 +108,8 @@
       el("log").scrollTop = el("log").scrollHeight;
     }
     var running = j && j.status === "running";
-    el("btnTrain").disabled = !!running;
+    var noSamples = !!(lastStatus && lastStatus.samples_ready === false);
+    el("btnTrain").disabled = !!running || noSamples;  // 样本不足时禁用，别起空任务
     el("btnDataset").disabled = !!running;
     el("btnStop").disabled = !running;
   }
@@ -95,17 +117,23 @@
   function post(url, body) {
     return fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: headers(),
       body: JSON.stringify(body || {}),
-    }).then(function (r) { return r.json(); }).then(function (j) {
+    }).then(function (r) {
+      if (r.status === 401 || r.status === 403) {
+        alert("口令不对或未配置：请在上方填管理口令（与控制台同一个）。");
+      }
+      return r.json();
+    }).then(function (j) {
       if (j && j.ok === false && j.error) { alert(j.error); }
       return j;
     });
   }
 
   function refresh() {
-    return fetch("/api/train/status").then(function (r) { return r.json(); })
+    return getJson("/api/train/status")
       .then(function (s) {
+        lastStatus = s;
         renderEnv(s);
         renderOptions(s);
         renderModels(s);
@@ -115,7 +143,7 @@
   }
 
   function pollJob() {
-    return fetch("/api/train/job").then(function (r) { return r.json(); })
+    return getJson("/api/train/job")
       .then(function (j) {
         renderJob(j, j.log_tail);
         if (j.status !== "running") {
@@ -141,6 +169,10 @@
   el("btnTrain").addEventListener("click", function () {
     var base = el("baseModel").value;
     if (!base) { alert("先选一个 HF 原版权重目录"); return; }
+    if (lastStatus && lastStatus.samples_ready === false) {
+      alert(lastStatus.reason || "样本不足：请先补充训练样本再训练。");
+      return;
+    }
     post("/api/train/train", {
       base_model: base,
       epochs: Number(el("epochs").value || 3),

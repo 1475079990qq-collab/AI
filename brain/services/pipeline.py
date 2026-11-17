@@ -19,6 +19,7 @@ from typing import AsyncIterator
 
 from brain import db, tools
 from brain.config import settings
+from brain.cognitive import trace as tmod
 from brain.schemas import ChatRequest, EmotionResult, TurnEvent, new_request_id
 from brain.services import feedback_rules, judge, live, llm, memory, prompt, tone
 
@@ -152,6 +153,18 @@ def _prev_reply(history: list[dict] | None) -> str:
     return ""
 
 
+def _prev_user(history: list[dict] | None) -> str:
+    """历史里他上一句说了什么（感知层用来判断「是不是又把同一件事问了一遍」）。"""
+    for turn in reversed(history or []):
+        if not isinstance(turn, dict):
+            continue
+        if str(turn.get("role")) == "user":
+            content = str(turn.get("content") or "").strip()
+            if content:
+                return content
+    return ""
+
+
 def _same_head(a: str, b: str, n: int = _HEAD_LEN) -> bool:
     pa, pb = _plain(a), _plain(b)
     return len(pa) >= n and pa[:n] == pb[:n]
@@ -173,21 +186,46 @@ def _shared_terms(facts: list[dict], limit: int = 3) -> list[str]:
 
 
 def _schedule_remember(user_text: str, emotion_label: str,
-                       user_id: str, session_id: str) -> None:
+                       user_id: str, session_id: str,
+                       request_id: str = "", seed_ids: list[str] | None = None,
+                       spread_ids: list[str] | None = None) -> None:
     """流结束后后台沉淀：把「用户说的话」写成长期记忆，绝不阻塞 SSE。
 
     只存用户这一侧 —— 过去存的是 AI 回复，知识库被自己的套话填满，
     检索回来的全是「我在呢，愿意多说一点吗」，这也是复读机的根源之一。
     顺手累加画像计数，到阈值就在后台重建一次画像。
+
+    V2 追加两步（都在同一个后台线程里，不碰热路径）：
+    - 记忆写入改成「先判价值再落库」（memory.store_fact 内部做），
+      身份/禁忌/偏好权重高，今天的流水低，提问和试探不写。
+    - 把这一轮真实点亮的节点记账，并强化它们之间的连线（用进）。
     """
     if not user_text:
         return
 
     def _do() -> None:
         try:
-            memory.store_fact(user_id, session_id, user_text, [])
+            memory.store_fact(user_id, session_id, user_text, [],
+                              emotion_label=emotion_label)
         except Exception:
             pass
+        try:
+            from brain.memory.consolidation import consolidate
+            consolidate(user_id, user_text, source_kind="user_said")
+        except Exception:
+            log.debug("知识巩固失败", exc_info=True)
+        try:
+            from brain.neural import plasticity
+            plasticity.reinforce(user_id=user_id, request_id=str(request_id or user_id),
+                                 seed_ids=list(seed_ids or []),
+                                 spread_ids=list(spread_ids or []))
+        except Exception:
+            log.debug("神经元记账失败", exc_info=True)
+        try:
+            from brain.evolution import strategy as strategy_mod
+            strategy_mod.promote_validated(user_id)
+        except Exception:
+            log.debug("策略提升失败", exc_info=True)
         try:
             from brain.services import profile
             profile.maybe_refresh(user_id)
@@ -334,14 +372,41 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
                 or (verdict2 == "pass" and reflect_payload.get("source") == "model" and how)
             )
             if should_store:
-                db.add_lesson(
+                # 权重：模型自己越确定、这轮越明显出错，这条经验越值得听。
+                try:
+                    conf = float(reflect_payload.get("confidence") or 0.0)
+                except (TypeError, ValueError):
+                    conf = 0.0
+                weight = min(0.9, 0.45 + 0.3 * max(0.0, min(1.0, conf))
+                             + (0.1 if verdict2 == "fail" else 0.0))
+                lesson_id, merged = db.add_lesson(
                     user_id=user_id, request_id=request_id, kind=kind, note=note,
                     verdict=verdict2, source=str(reflect_payload.get("source") or "rule"),
                     why=why, how=how,
-                    confidence=float(reflect_payload.get("confidence") or 0.0),
+                    confidence=conf,
                     degrade_reason=str(reflect_payload.get("degrade_reason") or ""),
+                    weight=round(weight, 3),
                 )
                 stored = True
+                # 教训也长节点：沉淀区那颗点，就是这条经验。
+                try:
+                    from brain.neural import growth as neural_growth
+                    grown = neural_growth.grow_lesson(
+                        user_id=user_id, lesson_id=lesson_id, note=note, weight=weight)
+                    live.emit("lesson_saved", lesson_id=int(lesson_id),
+                              lesson_text=note[:40], merged=bool(merged),
+                              neuron=str(grown.get("neuron") or ""),
+                              concepts=list(grown.get("concepts") or [])[:3])
+                except Exception:
+                    log.debug("教训生长失败", exc_info=True)
+                # 同类教训第二次出现，就让它成为一条候选策略（还不启用）。
+                try:
+                    from brain.evolution import strategy as strategy_mod
+                    strategy_mod.candidate_from_lesson(
+                        user_id=user_id,
+                        lesson={"kind": kind, "note": note, "how": how, "weight": weight})
+                except Exception:
+                    log.debug("登记策略候选失败", exc_info=True)
             live.emit(
                 "ruminate_done", request_id=request_id, verdict=verdict2, rule=kind,
                 stored=stored, skipped=skipped, skip_reason=skip_reason,
@@ -355,6 +420,14 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
         except Exception:
             log.exception("反刍失败（只影响这一条自我复盘）")
 
+        # 后台收尾：每 N 轮做一次衰减（计数按 user_id 隔离，异常不外抛）。
+        try:
+            from brain.services import maintenance
+
+            maintenance.maybe_decay(user_id, runtime)
+        except Exception:
+            pass
+
     try:
         loop = asyncio.get_running_loop()
         fut = loop.run_in_executor(None, _do)
@@ -366,7 +439,16 @@ def _schedule_after_turn(*, request_id: str, turn_id: int | None, user_text: str
 async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIterator[TurnEvent]:
     started = time.perf_counter()
     request_id = req.request_id or new_request_id()
-    live.emit("turn_start", request_id=request_id, text_len=len(req.text or ""),
+    # V2.5：一轮一个 trace_id，从本轮开头贯穿所有 live.emit（T13 带 trace_id 透传落 trace）。
+    trace_id = tmod.new_trace_id()
+    # 编排状态：在 try 之外初始化，异常 / 早退时 finally 也能安全收尾。
+    orchestrator_result: dict = {}
+    orchestrator_enabled = False
+    orchestrator_channel = ""
+    orchestrator_degraded = False
+    intent_info: dict = {}
+    live.emit("turn_start", request_id=request_id, trace_id=trace_id,
+              text_len=len(req.text or ""),
               text=str(req.text or "").strip()[:12])
     event_id: int | None = None
     turn_id: int | None = None
@@ -425,6 +507,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             await asyncio.to_thread(judge.judge, req.text, history, request_id)
         ).normalized()
         live.emit("judge",
+                  trace_id=trace_id,
                   emotion=emotion.label,
                   intensity=float(emotion.intensity or 0),
                   ms=round((time.perf_counter() - _t_judge) * 1000.0, 1),
@@ -507,40 +590,153 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             })
             return
 
+        # ---- 3.8) 感知 / 意图 / 注意力 + V2.5 编排（灰度开关）----
+        # 三段都是本地纯规则（毫秒级、不调模型），放在检索之前：
+        # 「要不要翻箱倒柜找记忆」「这一轮能说多少」是检索与出词的前置条件。
+        # V2.5：认知中枢 orchestrator 在开关=1（默认）时接管决策；置 0 立即回退
+        # 旧 cognitive.plan 链路（发布安全阀，技术规格 §8.4）。编排异常同样回退，
+        # 绝不打断对话。cognitive_plan 无论哪条链路都算出来，供 prompt/预算用。
+        stage = "cognitive"
+        signals: dict = {}
+        attention: dict = {}
+        cognitive_plan: dict = {}
+        try:
+            from brain.cognitive import allocate, classify, plan as plan_cognitive, sense, orchestrator
+            signals = sense(req.text, prev_user=_prev_user(history), prev_reply=_prev_reply(history))
+            intent_info = classify(signals)
+            attention = allocate(signals, intent_info, emotion)
+            cognitive_plan = plan_cognitive(signals, intent_info, attention, {}, emotion)
+            orchestrator_enabled = str(runtime.get("v25_orchestrator_enabled", "1")) == "1"
+            if orchestrator_enabled:
+                orchestrator_result = orchestrator.run(
+                    user_id=req.user_id, trace_id=trace_id, turn_id=turn_id,
+                    text=req.text, signals=signals,
+                    intent=str(intent_info.get("intent") or "chat"), emotion=emotion,
+                    emotion_intensity=float(emotion.intensity or 0),
+                    recalls=[], runtime=runtime)  # 记忆检索前先空 recalls；检索后再补一次
+                orchestrator_channel = str(orchestrator_result.get("channel") or "")
+                if orchestrator_result.get("degraded"):
+                    orchestrator_degraded = True
+                    degraded = True
+        except Exception:
+            log.exception("认知调度失败（本轮回退旧链路，按普通闲聊处理）")
+            orchestrator_result = {}
+            orchestrator_degraded = True
+            degraded = True
+        # 回退说明：开关=0 时 orchestrator_result 为空，下面二次决策整段跳过；
+        # cognitive_plan 已在上面算出，prompt/预算照旧走旧链路。
+
         # ---- 4) 记忆检索 ----
         stage = "memory"
         try:
             top_k = int(effective_params.get("memory_top_k", settings.MEMORY_TOP_K))
         except (TypeError, ValueError):
             top_k = settings.MEMORY_TOP_K
+        # V2.5 修正：认知层给的 memory_top_k 只是建议值，不得覆盖运行时参数。
+        # 运行时 memory_top_k 才是唯一决定取回条数的值（技术规格 §5.3、块①验收）。
+        # 建议值另存到 cognitive_plan，仅供 trace 观察，不参与取数。
+        try:
+            cognitive_plan["suggested_memory_top_k"] = int(
+                (cognitive_plan or {}).get("memory_top_k") or 0)
+        except (TypeError, ValueError):
+            cognitive_plan["suggested_memory_top_k"] = 0
         # 必须放线程池：memory.retrieve 内部是同步 SQLite 读，
         # 直接在事件循环里跑会卡住整条 SSE（历史上知识库 ev.wait(2.0) 就是这么卡的）。
         _t_mem = time.perf_counter()
         bundle = await asyncio.to_thread(
             memory.retrieve, req.user_id, req.text, top_k
         ) or {}
+        # 拿到记忆之后补一次规划：计划里要写「先对一下哪条旧事」，这时候才知道是哪条。
+        try:
+            from brain.cognitive import plan as plan_cognitive
+            cognitive_plan = plan_cognitive(signals, intent_info, attention, bundle, emotion)
+        except Exception:
+            cognitive_plan = cognitive_plan or {}
+        assoc = bundle.get("association") or {}
+        live.emit("intent",
+                  trace_id=trace_id,
+                  intent=str(cognitive_plan.get("intent") or ""),
+                  intent_cn=str(cognitive_plan.get("intent_cn") or ""),
+                  plan=str(cognitive_plan.get("plan_text") or ""),
+                  confidence=float(cognitive_plan.get("confidence") or 0.0),
+                  reason=str(cognitive_plan.get("reason") or ""),
+                  regions=list(cognitive_plan.get("regions") or []),
+                  focus=str(cognitive_plan.get("focus") or ""),
+                  budget=str((cognitive_plan.get("budget") or {}).get("max_chars") or ""),
+                  budget_tokens=int((cognitive_plan.get("budget") or {}).get("max_tokens") or 0))
         live.emit("memory",
+                  trace_id=trace_id,
                   facts=len(bundle.get("facts") or []),
                   emotions=len(bundle.get("emotions") or []),
                   episodes=len(bundle.get("episodes") or []),
                   open_loops=len(bundle.get("open_loops") or []),
                   source=str(bundle.get("source") or ""),
-                  # 每一条事实是被哪条线索捞回来的：词重合 / 最近说过 / 带情绪
+                  # 每一条事实是被哪条线索捞回来的：词重合 / 最近说过 / 带情绪 / 重要记忆
                   routes={tag: sum(1 for f in (bundle.get("facts") or [])
                                    if tag in (f.get("why") or []))
-                          for tag in ("词重合", "最近说过", "带情绪")},
-                  # 这一轮到底「想起了哪几条」：脑图据此点亮对应的神经元，并带出联想
+                          for tag in ("词重合", "最近说过", "带情绪", "重要记忆")},
+                  # 这一轮到底「想起了哪几条」：脑图据此点亮对应的真实神经元
                   ids=[str(f.get("id")) for f in (bundle.get("facts") or []) if f.get("id")][:6],
+                  neurons=[str(n.get("id")) for n in (assoc.get("seeds") or [])
+                           if n.get("id")][:6],
+                  concepts=[str(c) for c in (assoc.get("concepts") or []) if c][:6],
                   fact_text=str((bundle.get("facts") or [{}])[0].get("text") or "").strip()[:14],
-                  linked=_shared_terms(bundle.get("facts") or []),
+                  linked=([str(c) for c in (assoc.get("concepts") or []) if c]
+                          or _shared_terms(bundle.get("facts") or [])),
                   ms=round((time.perf_counter() - _t_mem) * 1000.0, 1))
 
-        # ---- 5) 组装 prompt（请求级快照）----
+        # ---- 4.2) V2.5：召回后补一次编排 + 自身状态/目标进 bundle ----
+        # 首轮编排还没看到记忆；这里把召回事实塞进 workspace 再跑一次决策，
+        # 并把 decision 以新 kind 下发（旧前端忽略未知 kind）。
+        # 开关=0（orchestrator_result 为空）时整段跳过 → 旧链路，发布安全阀。
+        try:
+            if orchestrator_result and not orchestrator_degraded:
+                from brain.cognitive import orchestrator as _orch
+                ws = orchestrator_result.get("workspace")
+                if ws is not None:
+                    ws.recalls = list((bundle or {}).get("facts") or [])[:10]
+                    once = _orch.run(
+                        user_id=req.user_id, trace_id=trace_id, turn_id=turn_id,
+                        text=req.text, signals=signals,
+                        intent=str(intent_info.get("intent") or "chat"), emotion=emotion,
+                        emotion_intensity=float(emotion.intensity or 0),
+                        recalls=ws.recalls, runtime=runtime)
+                    orchestrator_result = once
+                    orchestrator_channel = str(once.get("channel") or "")
+                    if once.get("degraded"):
+                        orchestrator_degraded = True
+                        degraded = True
+                    _dec = once.get("decision") or {}
+                    live.emit("decision", trace_id=trace_id, user_id=req.user_id,
+                              node_type="structure",
+                              options=_dec.get("options"),
+                              chosen_id=_dec.get("chosen_id"),
+                              chosen_by=_dec.get("chosen_by"),
+                              verified=_dec.get("verified"))
+        except Exception:
+            log.debug("编排二次决策失败", exc_info=True)
+            orchestrator_degraded = True
+            degraded = True
+
+        # 自身状态 + 活跃目标：T24 的 prompt 从 bundle 读这两项渲染一句人话。
+        # 无论编排开关开/关都取，保证两种状态下 prompt 注入行为一致；
+        # state 带 updated_at 才显示、goals 是含 title/status 的 list[dict]（T24 约定）。
+        try:
+            from brain.cognitive import agent_state, goal_manager
+            bundle["state"] = agent_state.get(req.user_id)
+            bundle["goals"] = goal_manager.active(req.user_id, limit=3)
+        except Exception:
+            log.debug("状态/目标取数失败（prompt 按无状态渲染）", exc_info=True)
+
+        # ---- 5) 组装 prompt（请求级快照 + 本轮认知计划）----
         stage = "prompt"
-        messages = prompt.build(persona, bundle, emotion, req.text, history)
+        messages = prompt.build(persona, bundle, emotion, req.text, history,
+                                plan=cognitive_plan)
         live.emit("prompt",
+                  trace_id=trace_id,
                   messages=len(messages),
-                  chars=sum(len(str(m.get("content") or "")) for m in messages))
+                  chars=sum(len(str(m.get("content") or "")) for m in messages),
+                  intent=str(cognitive_plan.get("intent") or ""))
         # 防复读：把上一轮回复的指纹写进 system，逼它换说法/正面答
         _anti_repeat(messages, history)
 
@@ -563,6 +759,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                     "content": tools.prompt_block(tool_hit[0], tool_hit[1], tool_result),
                 })
             live.emit("tool",
+                      trace_id=trace_id,
                       name=(tool_hit[0] if tool_hit else ""),
                       hit=bool(tool_hit),
                       ok=bool(tool_result),
@@ -570,7 +767,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         except Exception:
             log.exception("工具调用失败（这一轮按普通回答走）")
             tool_result = None
-            live.emit("tool", name="", hit=False, ok=False, ms=0.0)
+            live.emit("tool", trace_id=trace_id, name="", hit=False, ok=False, ms=0.0)
 
         # ---- 5.7) 「先想后说」：开关打开时，先在肚子里过一句（可关，默认关）----
         # 为什么做成开关：这台机器出字约 8 字/秒，多一次短推理就要多等 3~4 秒。
@@ -587,7 +784,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                     if len("".join(draft_parts)) >= 64:
                         break
                 draft = "".join(draft_parts).strip()
-                live.emit("think_draft", chars=len(draft),
+                live.emit("think_draft", trace_id=trace_id, chars=len(draft),
                           ms=round((time.perf_counter() - _t_draft) * 1000.0, 1))
                 if draft:
                     messages[0]["content"] += (
@@ -601,9 +798,21 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # LLM 生成器跑在独立 task 里：ping 计时只 cancel Queue.get（安全），
         # 绝不会 cancel 正在产出 token 的生成器 / httpx 流。
         stage = "llm"
-        agen = llm.stream(messages, effective_params)
-        # 这一轮没有独立的「意图/计划」结构，intent 留空，前端走兜底文案，不硬造。
-        live.emit("llm_start", messages=len(messages), intent="")
+        # 表达预算：这一轮由意图决定能说多少（闲聊短、技术长）。只降不升，不改用户配置。
+        turn_params = dict(effective_params)
+        try:
+            cap = int((cognitive_plan.get("budget") or {}).get("max_tokens") or 0)
+            base = int(turn_params.get("max_tokens") or 0)
+            if cap > 0 and (base <= 0 or cap < base):
+                turn_params["max_tokens"] = cap
+        except (TypeError, ValueError):
+            pass
+        agen = llm.stream(messages, turn_params)
+        # 这一轮真实判定出的意图随首帧下发，前端不再走「猜」的兜底文案。
+        live.emit("llm_start", trace_id=trace_id, messages=len(messages),
+                  intent=str(cognitive_plan.get("intent") or ""),
+                  intent_cn=str(cognitive_plan.get("intent_cn") or ""),
+                  max_tokens=int(turn_params.get("max_tokens") or 0))
         queue: asyncio.Queue = asyncio.Queue()
         _END = object()
 
@@ -669,7 +878,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                     "\n\n【这次必须换开头】重新说一遍，开头几个字和句式都要和刚才完全不同，"
                     "直接说他这次问的具体内容。"
                 )
-            agen = llm.stream(messages, effective_params)
+            agen = llm.stream(messages, turn_params)
             queue = asyncio.Queue()
             producer = asyncio.ensure_future(_produce(agen, queue))
 
@@ -685,10 +894,11 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                 if not _first_token:
                     _first_token = True
                     live.emit("first_token",
+                              trace_id=trace_id,
                               ms=round((time.perf_counter() - _t_llm) * 1000.0, 1))
                 if _chars >= _next_beat:
                     _next_beat = _chars + 24
-                    live.emit("tokens", chars=_chars, text=_recent)
+                    live.emit("tokens", trace_id=trace_id, chars=_chars, text=_recent)
                 if not head_checked:
                     head_buf.append(str(payload))
                     probe = "".join(head_buf)
@@ -732,7 +942,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             if loop_unit:
                 rules_now = list(rules_now) + ["repeat_loop"]
                 verdict_now = "fail"
-            live.emit("self_check", rules=rules_now, verdict=verdict_now,
+            live.emit("self_check", trace_id=trace_id, rules=rules_now, verdict=verdict_now,
                       chars=len(summary), loop=loop_unit)
             self_rules = rules_now
             self_verdict = verdict_now
@@ -793,6 +1003,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
             "truncated": False,
         })
         live.emit("turn_done",
+                  trace_id=trace_id,
                   request_id=request_id,
                   ms=round((time.perf_counter() - started) * 1000.0, 1),
                   chars=len(summary),
@@ -807,7 +1018,14 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # 存用户原话而非 AI 回复；门槛只过滤语气词，不看情绪强度 ——
         # 平淡的日常对话才是画像的主体，之前按 intensity 卡死导致几乎不落记忆。
         if auto_remember and _worth_remembering(req.text):
-            _schedule_remember(req.text, emotion.label, req.user_id, req.session_id)
+            _schedule_remember(
+                req.text, emotion.label, req.user_id, req.session_id,
+                request_id=request_id,
+                seed_ids=[str(n.get("id")) for n in (assoc.get("seeds") or [])
+                          if n.get("id")],
+                spread_ids=[str(n.get("id")) for n in (assoc.get("spread") or [])
+                            if n.get("id")],
+            )
         # 自检 / 摘要 / 待办：后台线程，不影响这一轮的 done 帧
         _schedule_after_turn(
             request_id=request_id,
@@ -834,6 +1052,7 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
         # 任何下游异常 → error 后 return；与 done 互斥。
         final_status = "error"
         live.emit("turn_error",
+                  trace_id=trace_id,
                   code=_error_code(exc, stage),
                   stage=stage,
                   ms=round((time.perf_counter() - started) * 1000.0, 1))
@@ -884,5 +1103,29 @@ async def handle(req: ChatRequest, params: dict, history: list[dict]) -> AsyncIt
                     except Exception:
                         pass
                 _safe_db(config_store.close_turn, turn_id, **close_kwargs)
+            except Exception:
+                pass
+        # ---- V2.5 收尾：每轮一条最小 trace（kind=trace，带 trace_id）----
+        # 编排开关=0 / 编排异常 / 早退（维护、空串、断连）时，orchestrator 不会落 trace，
+        # 这里兜底保证「每轮都有」；编排成功时它自己已写 trace，不重复。
+        # 快速通道同理：orchestrator.fast 已写 kind=trace，无需再补。
+        # 观测失败绝不影响回答。
+        if (not orchestrator_result or orchestrator_degraded):
+            try:
+                _emo = locals().get("emotion")
+                tmod.write(
+                    kind="trace", user_id=str(req.user_id),
+                    trace_id=trace_id, turn_id=turn_id,
+                    payload={
+                        "stage": stage,
+                        "status": final_status,
+                        "orchestrator": bool(orchestrator_enabled),
+                        "channel": orchestrator_channel or "old",
+                        "degraded": bool(degraded or orchestrator_degraded),
+                        "intent": str((intent_info or {}).get("intent") or ""),
+                        "emotion": str(getattr(_emo, "label", "") or ""),
+                        "ms": round((time.perf_counter() - started) * 1000.0, 1),
+                    },
+                    node_type="activity")
             except Exception:
                 pass

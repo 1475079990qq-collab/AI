@@ -7,13 +7,20 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from brain.routers.admin import _require_admin_token
 from brain.services import trainer
 
-router = APIRouter(prefix="/api/train", tags=["train"])
+# 与控制台同一套鉴权：常量时间比较 + 未配 token 时仅本机回环，
+# 整个 /api/train 前缀下的 6 个端点无例外受保护（技术规格 §8.1、E08）。
+router = APIRouter(
+    prefix="/api/train",
+    tags=["train"],
+    dependencies=[Depends(_require_admin_token)],
+)
 log = logging.getLogger("brain.train")
 
 

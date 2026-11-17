@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hmac
 import inspect
+import logging
 import math
 import re
 import subprocess
@@ -28,6 +29,8 @@ from brain import config_store
 from brain import db
 from brain.config import settings
 from brain.schemas import EMOTION_LABELS
+
+log = logging.getLogger(__name__)
 
 # ---- 运行时参数白名单：直接引用 config_store.RUNTIME_RULES（GET/PUT 共用唯一数据源）----
 PARAM_RULES: dict[str, dict[str, Any]] = config_store.RUNTIME_RULES
@@ -662,6 +665,32 @@ def list_lessons_route(
         return _degraded(exc, items=[])
 
 
+@router.get("/graph")
+def graph_route(
+    user_id: str = "u1",
+    nodes_limit: int = Query(default=1500, ge=1, le=8000),
+    edges_limit: int = Query(default=4000, ge=1, le=20000),
+) -> Any:
+    """真实神经网络：脑图按这张表画，而不是按「谁离谁近」。
+
+    nodes 来自 neurons（事实 / 教训 / 概念三类节点，带 importance 与 activation），
+    edges 来自 synapses（about=记忆→概念、cooccur=概念↔概念、semantic=记忆↔记忆、lesson=教训→概念）。
+    """
+    try:
+        from brain import db as database
+
+        nodes = database.list_neurons(user_id=user_id, limit=int(nodes_limit))
+        edges = database.list_synapses(user_id=user_id, limit=int(edges_limit))
+        return {
+            "user_id": user_id,
+            "nodes": nodes,
+            "edges": edges,
+            "stats": database.neuron_stats(user_id),
+        }
+    except Exception as exc:
+        return _degraded(exc, nodes=[], edges=[], stats={})
+
+
 @router.delete("/facts", dependencies=[Depends(_require_admin_token)])
 def delete_fact_route(id: str = Query(...)) -> Any:
     try:
@@ -928,23 +957,20 @@ async def live_stream(request: Request) -> StreamingResponse:
 
     async def _gen():
         yield ": connected\n\n"
-        agen = live.subscribe()
+        agen = live.subscribe_with_heartbeat(15.0)
         try:
-            while True:
-                try:
-                    ev = await asyncio.wait_for(agen.__anext__(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    if await request.is_disconnected():
-                        break
-                    yield ": ping\n\n"
-                    continue
+            async for ev in agen:
                 if await request.is_disconnected():
                     break
+                if str(ev.get("kind")) == "heartbeat":
+                    yield ": ping\n\n"
+                    continue
                 yield live.sse_frame(ev)
         except (asyncio.CancelledError, StopAsyncIteration):
-            raise
-        except Exception:
-            return
+            # 断连/结束只记日志，不冒泡（runtime-defensive §一部分第4条）
+            log.debug("SSE 订阅结束")
+        except Exception as exc:
+            log.warning("SSE 异常: %s", type(exc).__name__)
         finally:
             try:
                 await agen.aclose()
@@ -960,4 +986,29 @@ async def live_stream(request: Request) -> StreamingResponse:
             "Connection": "keep-alive",
         },
     )
+
+
+# ---- V2.5 · T35 认知轨迹查询（带鉴权、带归属、分页有上限，技术规格 §3.4）----
+# router 已整体挂 _require_admin_token；payload 写入时已脱敏（§8.3），这里直接返回不二次处理。
+@router.get("/cognitive-trace")
+def cognitive_trace(
+    trace_id: str | None = Query(default=None),
+    kind: str | None = Query(default=None),
+    node_type: str | None = Query(default=None),
+    user_id: str = Query(default="default"),
+    limit: int = Query(default=40, ge=1, le=200),
+    before_id: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    """认知轨迹查询：带鉴权、带归属、分页有上限（技术规格 §3.4）。"""
+    from brain.cognitive import trace as tmod
+    from brain import db
+    if limit == 40:  # 未显式传时取运行时默认
+        try:
+            limit = int(db.get_runtime_params().get("trace_recent_limit", 40))
+            limit = max(1, min(limit, 200))
+        except (TypeError, ValueError):
+            limit = 40
+    items = tmod.query(user_id=user_id, trace_id=trace_id, kind=kind,
+                       node_type=node_type, limit=limit, before_id=before_id)
+    return {"items": items, "has_more": len(items) >= limit}
 

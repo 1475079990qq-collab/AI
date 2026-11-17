@@ -45,3 +45,28 @@ def recall(text: str, *, user_id: str) -> dict:
     items = [{"snippet": str(r.get("text") or "")} for r in rows]
     return {"ok": True, "summary": "；".join(i["snippet"] for i in items[:3]),
             "data": {"items": items}}
+
+
+# --- 本地文档读取：只读用户主动放进 data/docs/ 的文件，路径归一化后必须在根内 ---
+# 注：from __future__ import annotations 已在文件顶部声明，勿在函数中途重复声明。
+from pathlib import Path
+import logging
+
+log = logging.getLogger("brain.tools.local")
+
+
+def read_text(rel_path: str, *, base: str | None = None) -> str:
+    """rel_path 必须相对 data/docs/；越界返回空串（security-baseline 路径穿越规则）。"""
+    root = Path(base) if base else (Path(__file__).resolve().parent.parent.parent / "data" / "docs")
+    root = root.resolve()
+    try:
+        target = (root / str(rel_path or "")).resolve()
+        if root != target and root not in target.parents:
+            log.warning("本地文档路径越界拒绝: %s", rel_path)
+            return ""
+        if not target.is_file() or target.stat().st_size > 2_000_000:
+            return ""
+        return target.read_text(encoding="utf-8", errors="ignore")[:100_000]
+    except Exception as exc:
+        log.debug("本地文档读取失败: %s", type(exc).__name__)
+        return ""

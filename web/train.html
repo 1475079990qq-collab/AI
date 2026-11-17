@@ -42,7 +42,11 @@
   button:disabled{opacity:.45;cursor:not-allowed}
   label.f{display:block;font-size:13px;color:var(--muted);margin:0 0 4px}
   .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-  input[type=text],input[type=number],select{
+  /* 管理口令行（与控制台共用 localStorage 的 companion.admin_token）*/
+  .row{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:13.5px}
+  .row label{color:var(--muted);white-space:nowrap}
+  .token-input{width:240px}
+  input[type=text],input[type=number],input[type=password],select{
     width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;
     background:#fff;font-family:ui-monospace,monospace;font-size:13px;color:var(--ink)}
   .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
@@ -75,6 +79,10 @@
       <label class="f" for="baseModel">底座（HF 原版权重目录，GGUF 不能训）</label>
       <select id="baseModel"></select>
       <p class="hint">列表里没有可选项，说明本机还没有 HF 权重；需要你先准备好目录再回来。</p>
+      <div class="row">
+        <label for="adminToken">管理口令</label>
+        <input id="adminToken" type="password" class="token-input" placeholder="与控制台同一个口令">
+      </div>
       <div class="grid" style="margin-top:12px">
         <div>
           <label class="f" for="epochs">训练轮数</label>
